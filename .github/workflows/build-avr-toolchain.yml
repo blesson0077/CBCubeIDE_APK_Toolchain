@@ -18,7 +18,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq binutils-arm-none-eabi xz-utils zstd ar binutils wget
+          sudo apt-get install -y -qq binutils xz-utils zstd wget file
 
       - name: Download Termux AVR packages (aarch64)
         run: |
