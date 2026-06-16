@@ -1,0 +1,14 @@
+name: AVR Toolchain Builder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository Ready
+        run: |
+          echo "CBCubeIDE AVR Toolchain Builder"
+          echo "Infrastructure ready"
