@@ -1,1 +1,214 @@
+# .github/workflows/build-avr-toolchain.yml
+# Place this file in your cube-ide-toolchains GitHub repo at:
+# .github/workflows/build-avr-toolchain.yml
+#
+# This workflow:
+# 1. Downloads prebuilt aarch64-linux-android AVR binaries from Termux
+# 2. Extracts and repackages them as a single .tar.gz
+# 3. Publishes a GitHub Release with the .tar.gz as a downloadable asset
+#
+# Trigger: manually via GitHub Actions UI, or on push to main.
 
+name: Build AVR Toolchain (aarch64-android)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+  push:
+    tags:
+      - 'avr-v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      TERMUX_REPO: https://packages.termux.dev/apt/termux-main/pool/main
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q binutils-aarch64-linux-gnu \
+            dpkg-dev xz-utils curl file
+
+      - name: Download Termux AVR packages (aarch64)
+        run: |
+          mkdir -p downloads
+          
+          # Helper function to download latest package from Termux repo
+          download_pkg() {
+            local PKG=$1
+            local SUBDIR=$2
+            echo "Fetching $PKG..."
+            # Get the package index to find the exact filename
+            curl -s "https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages" \
+              | grep -A 20 "Package: $PKG$" \
+              | grep "Filename:" \
+              | head -1 \
+              | awk '{print $2}' > /tmp/pkg_path.txt
+            
+            local PKG_PATH=$(cat /tmp/pkg_path.txt)
+            if [ -z "$PKG_PATH" ]; then
+              echo "ERROR: Could not find package $PKG"
+              exit 1
+            fi
+            
+            curl -L -o "downloads/${PKG}.deb" \
+              "https://packages.termux.dev/apt/termux-main/${PKG_PATH}"
+            echo "Downloaded: downloads/${PKG}.deb"
+          }
+
+          download_pkg "avr-gcc"
+          download_pkg "avr-binutils"
+          download_pkg "avrdude"
+          download_pkg "libusb"
+          download_pkg "libelf"
+
+      - name: Extract binaries from .deb packages
+        run: |
+          mkdir -p staging/bin staging/lib staging/share/avr/include
+
+          extract_deb() {
+            local PKG=$1
+            local WORKDIR="extract_${PKG}"
+            mkdir -p "$WORKDIR"
+            
+            # .deb is an ar archive containing data.tar.xz
+            cd "$WORKDIR"
+            ar x "../downloads/${PKG}.deb"
+            
+            if [ -f "data.tar.xz" ]; then
+              tar -xf data.tar.xz
+            elif [ -f "data.tar.gz" ]; then
+              tar -xf data.tar.gz
+            elif [ -f "data.tar.zst" ]; then
+              tar --zstd -xf data.tar.zst
+            fi
+            cd ..
+          }
+
+          extract_deb "avr-gcc"
+          extract_deb "avr-binutils"
+          extract_deb "avrdude"
+          extract_deb "libusb"
+          extract_deb "libelf"
+
+          # Termux installs to /data/data/com.termux/files/usr/
+          # Copy binaries we need
+          TERMUX_BIN="extract_avr-gcc/data/data/com.termux/files/usr/bin"
+          TERMUX_BIN2="extract_avr-binutils/data/data/com.termux/files/usr/bin"
+          TERMUX_BIN3="extract_avrdude/data/data/com.termux/files/usr/bin"
+          TERMUX_LIB="extract_libusb/data/data/com.termux/files/usr/lib"
+          TERMUX_LIB2="extract_libelf/data/data/com.termux/files/usr/lib"
+          TERMUX_LIB3="extract_avr-gcc/data/data/com.termux/files/usr/lib"
+
+          # Binaries
+          for BIN in avr-gcc avr-g++ avr-gcc-ar avr-cpp; do
+            [ -f "$TERMUX_BIN/$BIN" ] && cp "$TERMUX_BIN/$BIN" staging/bin/ && echo "Copied $BIN"
+          done
+          for BIN in avr-objcopy avr-objdump avr-ld avr-ar avr-ranlib avr-size avr-nm avr-strip; do
+            [ -f "$TERMUX_BIN2/$BIN" ] && cp "$TERMUX_BIN2/$BIN" staging/bin/ && echo "Copied $BIN"
+          done
+          [ -f "$TERMUX_BIN3/avrdude" ] && cp "$TERMUX_BIN3/avrdude" staging/bin/ && echo "Copied avrdude"
+
+          # Shared libraries (needed by avrdude and avr-gcc)
+          for LIB in libusb-1.0.so libusb-1.0.so.0 libusb-1.0.so.0.3.0; do
+            [ -f "$TERMUX_LIB/$LIB" ] && cp "$TERMUX_LIB/$LIB" staging/lib/ && echo "Copied $LIB"
+          done
+          for LIB in libelf.so libelf.so.1 libelf-0.so; do
+            [ -f "$TERMUX_LIB2/$LIB" ] && cp "$TERMUX_LIB2/$LIB" staging/lib/ && echo "Copied $LIB"
+          done
+          # libgcc, libstdc++ from avr-gcc package
+          for LIB in libgcc_s.so libgcc_s.so.1 libstdc++.so libstdc++.so.6; do
+            [ -f "$TERMUX_LIB3/$LIB" ] && cp "$TERMUX_LIB3/$LIB" staging/lib/ && echo "Copied $LIB"
+          done
+
+          # AVR libc headers and device specs (needed for compilation)
+          AVR_INCLUDE="extract_avr-gcc/data/data/com.termux/files/usr/lib/avr"
+          if [ -d "$AVR_INCLUDE" ]; then
+            cp -r "$AVR_INCLUDE" staging/
+            echo "Copied AVR device specs"
+          fi
+
+      - name: Verify extracted binaries
+        run: |
+          echo "=== Binaries ==="
+          ls -lh staging/bin/
+          echo ""
+          echo "=== Libraries ==="
+          ls -lh staging/lib/
+          echo ""
+          echo "=== Architecture check ==="
+          file staging/bin/avr-gcc || true
+          file staging/bin/avrdude || true
+          echo ""
+          echo "=== avr-gcc dependencies ==="
+          aarch64-linux-gnu-readelf -d staging/bin/avr-gcc | grep NEEDED || true
+          echo ""
+          echo "=== avrdude dependencies ==="
+          aarch64-linux-gnu-readelf -d staging/bin/avrdude | grep NEEDED || true
+
+      - name: Write manifest.json
+        run: |
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          cat > staging/manifest.json << EOF
+          {
+            "toolchain": "avr",
+            "version": "${VERSION}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "source": "Termux prebuilt aarch64-linux-android packages",
+            "binaries": ["avr-gcc", "avr-g++", "avr-objcopy", "avr-objdump", "avr-ld", "avr-ar", "avr-size", "avrdude"],
+            "targets": ["atmega328p", "atmega2560", "atmega32u4", "atmega168", "attiny85", "attiny84"],
+            "min_app_version": "1.0.0"
+          }
+          EOF
+          cat staging/manifest.json
+
+      - name: Package as tar.gz
+        run: |
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          tar -czf "avr-toolchain-aarch64-${VERSION}.tar.gz" -C staging .
+          ls -lh "avr-toolchain-aarch64-${VERSION}.tar.gz"
+          echo "ASSET_NAME=avr-toolchain-aarch64-${VERSION}.tar.gz" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Create GitHub Release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: "AVR Toolchain ${{ env.VERSION }} (aarch64-android)"
+          body: |
+            ## AVR Toolchain for Cube IDE Android
+
+            Prebuilt `aarch64-linux-android` AVR toolchain binaries,
+            sourced from [Termux](https://termux.dev) packages.
+
+            ### Included binaries
+            - `avr-gcc` / `avr-g++` — C/C++ compiler
+            - `avr-objcopy` / `avr-objdump` — object file utilities
+            - `avr-ld` / `avr-ar` / `avr-size` — linker and archiver
+            - `avrdude` — MCU programmer/uploader
+
+            ### Supported MCU targets
+            ATmega328P, ATmega2560, ATmega32U4, ATmega168, ATtiny85, ATtiny84
+
+            ### Installation
+            Install via the Toolchain Manager inside Cube IDE Android.
+            Do not install manually.
+
+            ### Source
+            Extracted from Termux `aarch64` package repository.
+            Termux packages are licensed under their respective open-source licenses.
+          files: ${{ env.ASSET_NAME }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
