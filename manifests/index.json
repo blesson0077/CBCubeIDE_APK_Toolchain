@@ -1,0 +1,20 @@
+{
+  "toolchains": [
+    {
+      "id": "avr",
+      "manifest": "avr.json"
+    },
+    {
+      "id": "arm",
+      "manifest": "arm.json"
+    },
+    {
+      "id": "esp32",
+      "manifest": "esp32.json"
+    },
+    {
+      "id": "riscv",
+      "manifest": "riscv.json"
+    }
+  ]
+}
