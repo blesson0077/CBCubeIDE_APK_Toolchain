@@ -1,8 +1,26 @@
-# CBCubeIDE_APK_Toolchain
-Toolchain releases for CBCube IDE Android
+# CBCubeIDE APK Toolchain Repository
 
-Toolchains distributed through this repository are subject
-to their respective upstream licenses.
+Official toolchain distribution repository for CBCubeIDE Android.
 
-AVR GCC, Binutils, AVR LibC, ESP-IDF, and other toolchains
-remain licensed by their original authors.
+Toolchains supported:
+
+- AVR GCC
+- ARM GNU Embedded
+- ESP32 Xtensa
+- ESP32 RISC-V
+
+Toolchains are distributed through GitHub Releases and installed automatically by CBCubeIDE Android.
+
+## Repository Purpose
+
+This repository contains:
+
+- Build workflows
+- Toolchain manifests
+- Release packages
+
+The toolchains themselves remain licensed under their respective upstream licenses.
+
+## Releases
+
+Toolchains are published as GitHub Release assets and consumed by CBCubeIDE Android.
