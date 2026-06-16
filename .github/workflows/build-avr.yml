@@ -19,6 +19,7 @@ jobs:
             curl \
             xz-utils \
             bzip2 \
+            unzip \
             tar
 
       - name: Create Workspace
@@ -52,6 +53,23 @@ jobs:
         run: |
           echo "Source folders:"
           find work/src -maxdepth 1 -type d
+
+      - name: Download Android NDK
+        run: |
+          cd work
+
+          wget https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+
+          unzip -q android-ndk-r27c-linux.zip
+
+      - name: Verify Android NDK
+        run: |
+          echo "NDK contents:"
+          ls -lh work
+
+          echo ""
+          echo "LLVM toolchain binaries:"
+          ls work/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin | head
 
       - name: Upload Source Bundle
         uses: actions/upload-artifact@v4
