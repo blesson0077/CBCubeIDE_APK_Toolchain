@@ -20,7 +20,8 @@ jobs:
             xz-utils \
             bzip2 \
             unzip \
-            tar
+            tar \
+            file
 
       - name: Create Workspace
         run: |
@@ -89,6 +90,32 @@ jobs:
           echo ""
           echo "Android Clang:"
           aarch64-linux-android21-clang --version
+
+      - name: Create Test Program
+        run: |
+          cat > hello.c << 'EOF'
+          #include <stdio.h>
+
+          int main()
+          {
+              printf("Hello from Android NDK\n");
+              return 0;
+          }
+          EOF
+
+      - name: Compile Test Program
+        run: |
+          export NDK=$PWD/work/android-ndk-r27c
+
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+
+          export PATH=$TOOLCHAIN/bin:$PATH
+
+          aarch64-linux-android21-clang hello.c -o hello
+
+      - name: Verify Test Binary
+        run: |
+          file hello
 
       - name: Upload Source Bundle
         uses: actions/upload-artifact@v4
