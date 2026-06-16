@@ -1,0 +1,13 @@
+name: AVR Placeholder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Hello
+        run: |
+          echo "AVR Toolchain Build Not Yet Implemented"
