@@ -71,6 +71,25 @@ jobs:
           echo "LLVM toolchain binaries:"
           ls work/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin | head
 
+      - name: Configure Android Toolchain
+        run: |
+          export NDK=$PWD/work/android-ndk-r27c
+
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+
+          export PATH=$TOOLCHAIN/bin:$PATH
+
+          echo "NDK=$NDK"
+          echo "TOOLCHAIN=$TOOLCHAIN"
+
+          echo ""
+          echo "Host Clang:"
+          clang --version
+
+          echo ""
+          echo "Android Clang:"
+          aarch64-linux-android21-clang --version
+
       - name: Upload Source Bundle
         uses: actions/upload-artifact@v4
         with:
