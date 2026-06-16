@@ -21,104 +21,92 @@ jobs:
             bzip2 \
             unzip \
             tar \
-            file
+            file \
+            build-essential \
+            flex \
+            bison \
+            texinfo
 
       - name: Create Workspace
         run: |
           mkdir -p work/src
+          mkdir -p work/build
 
       - name: Download Sources
         run: |
           cd work/src
 
-          wget https://ftp.gnu.org/gnu/binutils/binutils-2.40.tar.xz
+          wget -nc https://ftp.gnu.org/gnu/binutils/binutils-2.40.tar.xz
 
-          wget https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz
+          wget -nc https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz
 
-          wget https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2
-
-      - name: Verify Downloads
-        run: |
-          echo "Downloaded files:"
-          ls -lh work/src
+          wget -nc https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2
 
       - name: Extract Sources
         run: |
           cd work/src
 
-          tar -xf binutils-2.40.tar.xz
-          tar -xf gcc-12.2.0.tar.xz
-          tar -xf avr-libc-2.1.0.tar.bz2
-
-      - name: Verify Extraction
-        run: |
-          echo "Source folders:"
-          find work/src -maxdepth 1 -type d
+          [ -d binutils-2.40 ] || tar -xf binutils-2.40.tar.xz
+          [ -d gcc-12.2.0 ] || tar -xf gcc-12.2.0.tar.xz
+          [ -d avr-libc-2.1.0 ] || tar -xf avr-libc-2.1.0.tar.bz2
 
       - name: Download Android NDK
         run: |
           cd work
 
-          wget https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          wget -nc https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
 
-          unzip -q android-ndk-r27c-linux.zip
-
-      - name: Verify Android NDK
-        run: |
-          echo "NDK contents:"
-          ls -lh work
-
-          echo ""
-          echo "LLVM toolchain binaries:"
-          ls work/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin | head
+          if [ ! -d android-ndk-r27c ]; then
+            unzip -q android-ndk-r27c-linux.zip
+          fi
 
       - name: Configure Android Toolchain
         run: |
           export NDK=$PWD/work/android-ndk-r27c
-
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
 
           export PATH=$TOOLCHAIN/bin:$PATH
 
-          echo "NDK=$NDK"
-          echo "TOOLCHAIN=$TOOLCHAIN"
-
-          echo ""
-          echo "Host Clang:"
-          clang --version
-
-          echo ""
           echo "Android Clang:"
           aarch64-linux-android21-clang --version
 
-      - name: Create Test Program
+      - name: Create Binutils Build Directory
         run: |
-          cat > hello.c << 'EOF'
-          #include <stdio.h>
+          mkdir -p work/build/binutils
 
-          int main()
-          {
-              printf("Hello from Android NDK\n");
-              return 0;
-          }
-          EOF
-
-      - name: Compile Test Program
+      - name: Configure AVR Binutils
         run: |
           export NDK=$PWD/work/android-ndk-r27c
-
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
 
           export PATH=$TOOLCHAIN/bin:$PATH
 
-          aarch64-linux-android21-clang hello.c -o hello
+          export CC=aarch64-linux-android21-clang
+          export CXX=aarch64-linux-android21-clang++
 
-      - name: Verify Test Binary
+          cd work/build/binutils
+
+          ../../src/binutils-2.40/configure \
+            --target=avr \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
+            --prefix=$PWD/install \
+            --disable-nls \
+            --disable-werror
+
+      - name: Verify Configure Result
         run: |
-          file hello
+          ls -lh work/build/binutils
 
-      - name: Upload Source Bundle
+          echo ""
+          echo "Looking for Makefile..."
+          test -f work/build/binutils/Makefile
+
+          echo ""
+          echo "Configure successful."
+
+      - name: Upload Configure Logs
         uses: actions/upload-artifact@v4
         with:
-          name: avr-sources
-          path: work/src/
+          name: binutils-configure
+          path: work/build/binutils
