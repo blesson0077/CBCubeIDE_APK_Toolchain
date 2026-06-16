@@ -1,0 +1,17 @@
+{
+  "id": "avr",
+  "name": "AVR GCC",
+  "description": "AVR microcontroller toolchain",
+  "version": "0.0.0",
+  "architecture": "aarch64-linux-android",
+  "download_url": "",
+  "size": 0,
+  "sha256": "",
+  "installed_size": 0,
+  "targets": [
+    "atmega328p",
+    "atmega2560",
+    "atmega32u4",
+    "attiny85"
+  ]
+}
