@@ -81,11 +81,15 @@ jobs:
           export CC=aarch64-linux-android21-clang
           export CXX=aarch64-linux-android21-clang++
 
+          export AR=llvm-ar
+          export RANLIB=llvm-ranlib
+          export STRIP=llvm-strip
+
           cd work/build/binutils
 
           ../../src/binutils-2.40/configure \
             --target=avr \
-            --host=aarch64-linux-android \
+            --host=aarch64-unknown-linux-android \
             --build=x86_64-linux-gnu \
             --prefix=$PWD/install \
             --disable-nls \
@@ -102,12 +106,26 @@ jobs:
           export CC=aarch64-linux-android21-clang
           export CXX=aarch64-linux-android21-clang++
 
+          export AR=llvm-ar
+          export RANLIB=llvm-ranlib
+          export STRIP=llvm-strip
+
           echo "Compiler location:"
           which aarch64-linux-android21-clang
 
           echo ""
           echo "Compiler version:"
           aarch64-linux-android21-clang --version
+
+          echo ""
+          echo "AR location:"
+          which llvm-ar
+
+          echo "RANLIB location:"
+          which llvm-ranlib
+
+          echo "STRIP location:"
+          which llvm-strip
 
           cd work/build/binutils
 
