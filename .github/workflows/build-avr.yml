@@ -131,19 +131,15 @@ jobs:
 
           make -j$(nproc) all-binutils
 
-          - name: Verify AVR Tools
-          run: |
-            echo "Searching for generated binaries..."
-  
-            find work/build/binutils -type f | grep "as-new" || true
-  
-            find work/build/binutils -type f | grep "ld-new" || true
-  
-            find work/build/binutils -type f | grep "objdump" || true
-  
-            find work/build/binutils -type f | grep "objcopy" || true
-  
-            find work/build/binutils -type f | grep "/ar$" || true
+      - name: Verify AVR Tools
+        run: |
+          echo "Searching for generated binaries..."
+
+          find work/build/binutils -type f | grep "as-new" || true
+          find work/build/binutils -type f | grep "ld-new" || true
+          find work/build/binutils -type f | grep "objdump" || true
+          find work/build/binutils -type f | grep "objcopy" || true
+          find work/build/binutils -type f | grep "/ar$" || true
 
       - name: Upload Binutils Build
         uses: actions/upload-artifact@v4
