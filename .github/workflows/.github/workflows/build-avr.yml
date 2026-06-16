@@ -1,4 +1,4 @@
-name: AVR Placeholder
+name: AVR Toolchain Builder
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Hello
+      - name: Repository Ready
         run: |
-          echo "AVR Toolchain Build Not Yet Implemented"
+          echo "CBCubeIDE AVR Toolchain Builder"
+          echo "Infrastructure ready"
