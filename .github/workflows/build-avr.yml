@@ -37,9 +37,7 @@ jobs:
           cd work/src
 
           wget -nc https://ftp.gnu.org/gnu/binutils/binutils-2.40.tar.xz
-
           wget -nc https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz
-
           wget -nc https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2
 
       - name: Extract Sources
@@ -64,10 +62,8 @@ jobs:
         run: |
           export NDK=$PWD/work/android-ndk-r27c
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-
           export PATH=$TOOLCHAIN/bin:$PATH
 
-          echo "Android Clang:"
           aarch64-linux-android21-clang --version
 
       - name: Create Binutils Build Directory
@@ -94,19 +90,24 @@ jobs:
             --disable-nls \
             --disable-werror
 
-      - name: Verify Configure Result
+      - name: Build AVR Binutils
         run: |
-          ls -lh work/build/binutils
+          cd work/build/binutils
 
-          echo ""
-          echo "Looking for Makefile..."
-          test -f work/build/binutils/Makefile
+          make -j$(nproc) all-binutils
 
-          echo ""
-          echo "Configure successful."
+      - name: Verify AVR Tools
+        run: |
+          echo "Searching for AVR binaries..."
 
-      - name: Upload Configure Logs
+          find work/build/binutils -name avr-as
+          find work/build/binutils -name avr-ld
+          find work/build/binutils -name avr-objdump
+          find work/build/binutils -name avr-objcopy
+          find work/build/binutils -name avr-ar
+
+      - name: Upload Binutils Build
         uses: actions/upload-artifact@v4
         with:
-          name: binutils-configure
+          name: avr-binutils-build
           path: work/build/binutils
