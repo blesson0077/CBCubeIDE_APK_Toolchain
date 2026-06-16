@@ -3,7 +3,7 @@ name: Build AVR Toolchain (aarch64-android)
 on:
   workflow_dispatch:
     inputs:
-      version:
+      release_version:
         description: 'Release version (e.g. v1.0.0)'
         required: true
         default: 'v1.0.0'
@@ -11,292 +11,145 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install tools
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q \
-            binutils-aarch64-linux-gnu \
-            xz-utils \
-            curl \
-            file \
-            zstd \
-            jq
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils-arm-none-eabi xz-utils zstd ar binutils wget
 
       - name: Download Termux AVR packages (aarch64)
         run: |
+          set -e
           mkdir -p downloads
-          BASE="https://packages.termux.dev/apt/termux-main"
+          cd downloads
 
-          # Download and decompress the package index (Termux uses zstd)
-          echo "Fetching package index..."
-          curl -sL "$BASE/dists/stable/main/binary-aarch64/Packages.xz" -o /tmp/Packages.xz
-          if [ -s /tmp/Packages.xz ]; then
-            xz -d /tmp/Packages.xz -c > /tmp/Packages
-          else
-            curl -sL "$BASE/dists/stable/main/binary-aarch64/Packages" -o /tmp/Packages
-          fi
+          POOL_URL="https://packages.termux.dev/apt/termux-main/pool/main/a"
 
-          # If still empty, try zst
-          if [ ! -s /tmp/Packages ]; then
-            curl -sL "$BASE/dists/stable/main/binary-aarch64/Packages.zst" -o /tmp/Packages.zst
-            zstd -d /tmp/Packages.zst -o /tmp/Packages
-          fi
+          echo "Fetching pool directory listing..."
+          curl -fsSL "$POOL_URL/" -o pool_index.html
 
-          echo "Package index size: $(wc -c < /tmp/Packages) bytes"
+          # Extract .deb filenames for the packages we need, picking the
+          # aarch64 build of each. Termux filenames look like:
+          #   avr-gcc_<version>_aarch64.deb
+          #   avr-binutils_<version>_aarch64.deb
+          #   avrdude_<version>_aarch64.deb
+          for pkg in avr-gcc avr-binutils avrdude; do
+            echo "Looking for package: $pkg"
+            fname=$(grep -oE "href=\"${pkg}_[^\"]*_aarch64\.deb\"" pool_index.html \
+                      | sed -E 's/href="(.*)"/\1/' \
+                      | sort -V | tail -n1)
 
-          # Function: find and download a package by name
-          download_pkg() {
-            local PKG_NAME=$1
-            echo "--- Fetching $PKG_NAME ---"
-            
-            # Extract Filename field for this package
-            local PKG_FILE=$(awk "
-              /^Package: ${PKG_NAME}\$/ { found=1 }
-              found && /^Filename:/ { print \$2; found=0 }
-            " /tmp/Packages | head -1)
-
-            if [ -z "$PKG_FILE" ]; then
-              echo "ERROR: Package '$PKG_NAME' not found in index"
-              # Try browsing the pool directory directly as fallback
-              local POOL_URL="$BASE/pool/main/${PKG_NAME:0:1}/$PKG_NAME/"
-              echo "Trying pool URL: $POOL_URL"
-              local DEB_FILE=$(curl -sL "$POOL_URL" | grep -o "href=\"[^\"]*aarch64\.deb\"" | head -1 | sed 's/href="//;s/"//')
-              if [ -n "$DEB_FILE" ]; then
-                PKG_FILE="pool/main/${PKG_NAME:0:1}/$PKG_NAME/$DEB_FILE"
-                echo "Found via pool listing: $PKG_FILE"
-              else
-                echo "FATAL: Cannot find package $PKG_NAME anywhere"
-                exit 1
-              fi
-            fi
-
-            local DOWNLOAD_URL="$BASE/$PKG_FILE"
-            echo "Downloading: $DOWNLOAD_URL"
-            curl -L --retry 3 --retry-delay 2 \
-              -o "downloads/${PKG_NAME}.deb" \
-              "$DOWNLOAD_URL"
-            
-            local SIZE=$(wc -c < "downloads/${PKG_NAME}.deb")
-            echo "Downloaded ${PKG_NAME}.deb: $SIZE bytes"
-            
-            if [ "$SIZE" -lt 1000 ]; then
-              echo "ERROR: Download too small — likely failed"
-              cat "downloads/${PKG_NAME}.deb"
+            if [ -z "$fname" ]; then
+              echo "ERROR: could not find a .deb for $pkg in pool listing"
+              echo "---- pool_index.html snippet (grep $pkg) ----"
+              grep -i "$pkg" pool_index.html || echo "(no matches at all for $pkg)"
               exit 1
             fi
-          }
 
-          download_pkg "avr-gcc"
-          download_pkg "avr-binutils"
-          download_pkg "avrdude"
-          download_pkg "libusb"
-          download_pkg "libelf"
+            echo "Found: $fname"
+            curl -fsSL "$POOL_URL/$fname" -o "$fname"
+          done
 
-          echo "=== All downloads complete ==="
-          ls -lh downloads/
+          ls -la
 
       - name: Extract binaries from .deb packages
         run: |
-          mkdir -p staging/bin staging/lib
+          set -e
+          mkdir -p extracted/bin extracted/lib extracted/etc
+          cd downloads
 
-          extract_deb() {
-            local PKG=$1
-            local WORKDIR="extract_${PKG}"
-            mkdir -p "$WORKDIR"
-            cd "$WORKDIR"
+          for deb in *.deb; do
+            echo "=== Extracting $deb ==="
+            workdir="work_$(basename "$deb" .deb)"
+            mkdir -p "$workdir"
+            ar x "$deb" --output="$workdir" 2>/dev/null || (cd "$workdir" && ar x "../$deb")
 
-            echo "Extracting $PKG.deb..."
-            ar x "../downloads/${PKG}.deb" 2>/dev/null || true
+            cd "$workdir"
+            data_archive=$(ls data.tar.* 2>/dev/null | head -n1)
 
-            # data archive can be .tar.xz, .tar.gz, or .tar.zst
-            if [ -f "data.tar.xz" ]; then
-              tar -xf data.tar.xz
-            elif [ -f "data.tar.gz" ]; then
-              tar -xf data.tar.gz
-            elif [ -f "data.tar.zst" ]; then
-              zstd -d data.tar.zst -c | tar -x
-            else
-              echo "ERROR: No data archive found in $PKG.deb"
+            if [ -z "$data_archive" ]; then
+              echo "ERROR: no data.tar.* found in $deb"
               ls -la
               exit 1
             fi
 
-            cd ..
-            echo "Extracted $PKG OK"
-          }
+            echo "Data archive: $data_archive"
+            case "$data_archive" in
+              *.tar.xz)  tar -xJf "$data_archive" ;;
+              *.tar.gz)  tar -xzf "$data_archive" ;;
+              *.tar.zst) tar --use-compress-program=unzstd -xf "$data_archive" ;;
+              *) echo "Unknown archive format: $data_archive"; exit 1 ;;
+            esac
 
-          extract_deb "avr-gcc"
-          extract_deb "avr-binutils"
-          extract_deb "avrdude"
-          extract_deb "libusb"
-          extract_deb "libelf"
+            # Termux installs under data/data/com.termux/files/usr/
+            TERMUX_PREFIX="data/data/com.termux/files/usr"
 
-          # Termux installs to /data/data/com.termux/files/usr/
-          # Some versions use /data/data/com.termux/files/usr directly
-          find_termux_root() {
-            local PKG=$1
-            local DIR="extract_${PKG}/data/data/com.termux/files/usr"
-            if [ -d "$DIR" ]; then
-              echo "$DIR"
-            else
-              # fallback: search for bin/ directory
-              find "extract_${PKG}" -type d -name "bin" | head -1 | sed 's|/bin||'
+            if [ -d "$TERMUX_PREFIX/bin" ]; then
+              find "$TERMUX_PREFIX/bin" -maxdepth 1 -type f -exec cp -v {} ../../extracted/bin/ \;
             fi
-          }
-
-          echo "=== Copying binaries ==="
-
-          AVR_GCC_ROOT=$(find_termux_root "avr-gcc")
-          AVR_BIN_ROOT=$(find_termux_root "avr-binutils")
-          AVR_DUDE_ROOT=$(find_termux_root "avrdude")
-          LIBUSB_ROOT=$(find_termux_root "libusb")
-          LIBELF_ROOT=$(find_termux_root "libelf")
-
-          echo "avr-gcc root: $AVR_GCC_ROOT"
-          echo "avr-binutils root: $AVR_BIN_ROOT"
-
-          # Copy compiler binaries
-          for BIN in avr-gcc avr-g++ avr-gcc-ar avr-cpp; do
-            SRC="$AVR_GCC_ROOT/bin/$BIN"
-            [ -f "$SRC" ] && cp "$SRC" staging/bin/ && echo "Copied $BIN" || echo "SKIP $BIN (not found)"
-          done
-
-          # Copy binutils
-          for BIN in avr-objcopy avr-objdump avr-ld avr-ar avr-ranlib avr-size avr-nm avr-strip; do
-            SRC="$AVR_BIN_ROOT/bin/$BIN"
-            [ -f "$SRC" ] && cp "$SRC" staging/bin/ && echo "Copied $BIN" || echo "SKIP $BIN (not found)"
-          done
-
-          # Copy avrdude
-          SRC="$AVR_DUDE_ROOT/bin/avrdude"
-          [ -f "$SRC" ] && cp "$SRC" staging/bin/ && echo "Copied avrdude" || echo "SKIP avrdude (not found)"
-
-          # Copy avrdude config file (required by avrdude to know about MCUs)
-          for CONF_PATH in \
-            "$AVR_DUDE_ROOT/etc/avrdude.conf" \
-            "$AVR_DUDE_ROOT/share/avrdude/avrdude.conf"; do
-            if [ -f "$CONF_PATH" ]; then
-              mkdir -p staging/etc
-              cp "$CONF_PATH" staging/etc/avrdude.conf
-              echo "Copied avrdude.conf"
-              break
+            if [ -d "$TERMUX_PREFIX/lib" ]; then
+              find "$TERMUX_PREFIX/lib" -maxdepth 1 -type f \( -name '*.so' -o -name '*.so.*' \) -exec cp -v {} ../../extracted/lib/ \;
             fi
-          done
-
-          # Copy shared libraries
-          for LIB in libusb-1.0.so libusb-1.0.so.0 libusb-1.0.so.0.3.0; do
-            SRC="$LIBUSB_ROOT/lib/$LIB"
-            [ -f "$SRC" ] && cp "$SRC" staging/lib/ && echo "Copied $LIB" || true
-          done
-
-          for LIB in libelf.so libelf.so.1; do
-            SRC="$LIBELF_ROOT/lib/$LIB"
-            [ -f "$SRC" ] && cp "$SRC" staging/lib/ && echo "Copied $LIB" || true
-          done
-
-          # Copy gcc runtime libs
-          for LIB in libgcc_s.so libgcc_s.so.1 libstdc++.so libstdc++.so.6; do
-            SRC="$AVR_GCC_ROOT/lib/$LIB"
-            [ -f "$SRC" ] && cp "$SRC" staging/lib/ && echo "Copied $LIB" || true
-          done
-
-          # Copy AVR device support files (headers + specs — needed for compilation)
-          for AVR_LIB_PATH in \
-            "$AVR_GCC_ROOT/lib/avr" \
-            "$AVR_BIN_ROOT/lib/avr" \
-            "$AVR_GCC_ROOT/avr"; do
-            if [ -d "$AVR_LIB_PATH" ]; then
-              cp -r "$AVR_LIB_PATH" staging/avr
-              echo "Copied AVR device support from $AVR_LIB_PATH"
-              break
+            if [ -d "$TERMUX_PREFIX/etc" ]; then
+              find "$TERMUX_PREFIX/etc" -maxdepth 1 -type f -name 'avrdude.conf' -exec cp -v {} ../../extracted/etc/ \;
             fi
+
+            cd ../..
           done
 
-          echo ""
-          echo "=== Final staging/bin contents ==="
-          ls -lh staging/bin/
-          echo ""
-          echo "=== Final staging/lib contents ==="
-          ls -lh staging/lib/ || echo "(empty)"
+          echo "=== Extracted bin contents ==="
+          ls -la extracted/bin
+          echo "=== Extracted lib contents ==="
+          ls -la extracted/lib || true
+          echo "=== Extracted etc contents ==="
+          ls -la extracted/etc || true
 
       - name: Verify binaries are aarch64
         run: |
-          echo "=== Architecture verification ==="
-          for BIN in staging/bin/*; do
-            echo -n "$(basename $BIN): "
-            file "$BIN" | grep -o "ELF.*" || echo "NOT ELF"
+          set -e
+          cd extracted/bin
+          if [ -z "$(ls -A .)" ]; then
+            echo "ERROR: extracted/bin is empty"
+            exit 1
+          fi
+          for f in *; do
+            echo "--- $f ---"
+            file "$f"
           done
-          
-          echo ""
-          echo "=== avr-gcc dependencies ==="
-          aarch64-linux-gnu-readelf -d staging/bin/avr-gcc 2>/dev/null | grep NEEDED || echo "readelf failed"
-          
-          echo ""
-          echo "=== avrdude dependencies ==="
-          aarch64-linux-gnu-readelf -d staging/bin/avrdude 2>/dev/null | grep NEEDED || echo "readelf failed"
 
       - name: Write manifest.json
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          BIN_LIST=$(ls staging/bin/ | jq -R . | jq -s . 2>/dev/null || echo '[]')
-          
-          cat > staging/manifest.json << EOF
+          cat > extracted/manifest.json <<EOF
           {
-            "toolchain": "avr",
-            "version": "${VERSION}",
+            "name": "avr-toolchain",
+            "arch": "aarch64",
+            "platform": "android",
+            "version": "${{ github.event.inputs.release_version }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "source": "Termux prebuilt aarch64-linux-android packages",
-            "repo": "https://packages.termux.dev",
-            "binaries": ["avr-gcc", "avr-g++", "avr-objcopy", "avr-objdump", "avr-ld", "avr-ar", "avr-size", "avrdude"],
-            "targets": ["atmega328p", "atmega2560", "atmega32u4", "atmega168", "attiny85", "attiny84"],
-            "min_app_version": "1.0.0",
-            "lib_dir": "lib",
-            "etc_dir": "etc",
-            "avr_dir": "avr"
+            "source": "termux"
           }
           EOF
-          
-          echo "manifest.json:"
-          cat staging/manifest.json
+          cat extracted/manifest.json
 
       - name: Package as tar.gz
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          ASSET="avr-toolchain-aarch64-${VERSION}.tar.gz"
-          tar -czf "$ASSET" -C staging .
-          ls -lh "$ASSET"
-          echo "ASSET_NAME=$ASSET" >> $GITHUB_ENV
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          set -e
+          VERSION="${{ github.event.inputs.release_version }}"
+          ASSET_NAME="avr-toolchain-aarch64-${VERSION}.tar.gz"
+          cd extracted
+          chmod +x bin/* || true
+          tar -czf "../${ASSET_NAME}" .
+          cd ..
+          ls -la "${ASSET_NAME}"
+          echo "ASSET_NAME=${ASSET_NAME}" >> $GITHUB_ENV
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.VERSION }}
-          name: "AVR Toolchain ${{ env.VERSION }} (aarch64-android)"
-          body: |
-            ## AVR Toolchain for Cube IDE Android
-
-            Prebuilt `aarch64-linux-android` AVR toolchain binaries
-            sourced from [Termux](https://termux.dev) packages.
-
-            ### Binaries included
-            - `avr-gcc` / `avr-g++` — C/C++ compiler
-            - `avr-objcopy` / `avr-objdump` — object utilities  
-            - `avr-ld` / `avr-ar` / `avr-size` — linker and archiver
-            - `avrdude` + `avrdude.conf` — MCU uploader
-
-            ### Supported MCU targets
-            ATmega328P · ATmega2560 · ATmega32U4 · ATmega168 · ATtiny85 · ATtiny84
-
-            ### Install
-            Use the Toolchain Manager inside Cube IDE Android.
+          tag_name: ${{ github.event.inputs.release_version }}
+          name: "AVR Toolchain ${{ github.event.inputs.release_version }} (aarch64-android)"
           files: ${{ env.ASSET_NAME }}
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
