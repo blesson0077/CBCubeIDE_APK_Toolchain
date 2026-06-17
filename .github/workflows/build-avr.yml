@@ -223,7 +223,9 @@ jobs:
             --disable-libada \
             --disable-libquadmath \
             --disable-libgomp \
-            --disable-libstdcxx
+            --disable-libstdcxx \
+            --disable-lto \
+            --disable-plugin
 
       - name: Build AVR GCC
         run: |
@@ -241,7 +243,7 @@ jobs:
       
           cd work/build/gcc
       
-          make -j$(nproc) all-gcc 
+          make -j$(nproc) 
 
       - name: Verify GCC Build
         run: |
