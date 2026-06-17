@@ -225,6 +225,36 @@ jobs:
             --disable-libgomp \
             --disable-libstdcxx
 
+      - name: Build AVR GCC
+        run: |
+          export NDK=$PWD/work/android-ndk-r27c
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+      
+          export PATH=$TOOLCHAIN/bin:$PATH
+      
+          export CC=aarch64-linux-android21-clang
+          export CXX=aarch64-linux-android21-clang++
+      
+          export AR=llvm-ar
+          export RANLIB=llvm-ranlib
+          export STRIP=llvm-strip
+      
+          cd work/build/gcc
+      
+          make -j$(nproc) all-gcc 
+
+      - name: Verify GCC Build
+        run: |
+          echo "Searching GCC executables..."
+
+          find work/build/gcc -name "xgcc" || true
+
+          find work/build/gcc -name "cc1" || true
+
+          find work/build/gcc -name "cc1plus" || true
+
+          find work/build/gcc -type f | grep avr || true
+
       - name: Upload AVR Binutils Package
         uses: actions/upload-artifact@v4
         with:
