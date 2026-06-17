@@ -98,7 +98,6 @@ jobs:
       - name: Build AVR Binutils
         run: |
           export NDK=$PWD/work/android-ndk-r27c
-
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
 
           export PATH=$TOOLCHAIN/bin:$PATH
@@ -109,6 +108,23 @@ jobs:
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
+
+          echo "Compiler location:"
+          which aarch64-linux-android21-clang
+
+          echo ""
+          echo "Compiler version:"
+          aarch64-linux-android21-clang --version
+
+          echo ""
+          echo "AR location:"
+          which llvm-ar
+
+          echo "RANLIB location:"
+          which llvm-ranlib
+
+          echo "STRIP location:"
+          which llvm-strip
 
           cd work/build/binutils
 
@@ -142,16 +158,19 @@ jobs:
 
           make install-binutils
           make install-gas
-          make install-ld
 
       - name: Verify Installed AVR Tools
         run: |
-          echo "Installed files:"
+          echo "Installed AVR files:"
           find work/build/binutils/install -type f | sort
 
           echo ""
-          echo "Installed binaries:"
-          find work/build/binutils/install/bin -type f | sort || true
+          echo "Installed AVR bin directory:"
+          ls -lh work/build/binutils/install/bin || true
+
+          echo ""
+          echo "Searching for AVR executables:"
+          find work/build/binutils/install -name "*avr*" || true
 
       - name: Upload AVR Binutils Package
         uses: actions/upload-artifact@v4
