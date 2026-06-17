@@ -51,7 +51,7 @@ jobs:
           [ -d binutils-2.40 ] || tar -xf binutils-2.40.tar.xz
           [ -d gcc-12.2.0 ] || tar -xf gcc-12.2.0.tar.xz
           [ -d avr-libc-2.1.0 ] || tar -xf avr-libc-2.1.0.tar.bz2
-    
+
       - name: Download GCC Prerequisites
         run: |
           cd work/src/gcc-12.2.0
@@ -186,10 +186,6 @@ jobs:
           echo ""
           echo "Searching for AVR executables:"
           find work/build/binutils/install -name "*avr*" || true
-          
-      - name: Create GCC Build Directory
-        run: |
-          mkdir -p work/build/gcc
 
       - name: Configure AVR GCC
         run: |
@@ -205,7 +201,11 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
+          # Clean any previous GCC build
+          rm -rf work/build/gcc
           mkdir -p work/build/gcc
+
+          BINUTILS_INSTALL=$PWD/work/build/binutils/install
 
           cd work/build/gcc
 
@@ -213,10 +213,12 @@ jobs:
             --target=avr \
             --host=aarch64-unknown-linux-android \
             --build=x86_64-linux-gnu \
-            --prefix=$PWD/install \
-            --disable-nls \
-            --enable-languages=c,c++ \
+            --prefix=$BINUTILS_INSTALL \
+            --with-as=$BINUTILS_INSTALL/bin/avr-as \
+            --with-ld=$BINUTILS_INSTALL/bin/avr-ld \
+            --enable-languages=c \
             --without-headers \
+            --disable-nls \
             --disable-shared \
             --disable-threads \
             --disable-libssp \
@@ -231,31 +233,69 @@ jobs:
         run: |
           export NDK=$PWD/work/android-ndk-r27c
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-      
+
           export PATH=$TOOLCHAIN/bin:$PATH
-      
+
           export CC=aarch64-linux-android21-clang
           export CXX=aarch64-linux-android21-clang++
-      
+
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
-      
+
           cd work/build/gcc
-      
-          make -j$(nproc) 
+
+          make -j$(nproc) all-gcc
 
       - name: Verify GCC Build
         run: |
-          echo "Searching GCC executables..."
-
+          echo "=== Searching for xgcc ==="
           find work/build/gcc -name "xgcc" || true
 
+          echo ""
+          echo "=== Searching for cc1 ==="
           find work/build/gcc -name "cc1" || true
 
+          echo ""
+          echo "=== Searching for cc1plus (should NOT exist) ==="
           find work/build/gcc -name "cc1plus" || true
 
-          find work/build/gcc -type f | grep avr || true
+          echo ""
+          echo "=== All GCC build executables ==="
+          find work/build/gcc/gcc -type f -executable 2>/dev/null | sort || true
+
+      - name: Install AVR GCC
+        run: |
+          export NDK=$PWD/work/android-ndk-r27c
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+
+          export PATH=$TOOLCHAIN/bin:$PATH
+
+          export CC=aarch64-linux-android21-clang
+          export CXX=aarch64-linux-android21-clang++
+
+          export AR=llvm-ar
+          export RANLIB=llvm-ranlib
+          export STRIP=llvm-strip
+
+          cd work/build/gcc
+
+          make install-gcc
+
+      - name: Verify AVR GCC Installed
+        run: |
+          BINUTILS_INSTALL=$PWD/work/build/binutils/install
+
+          echo "=== AVR bin directory ==="
+          ls -lh $BINUTILS_INSTALL/bin/ || true
+
+          echo ""
+          echo "=== Searching for avr-gcc ==="
+          find $BINUTILS_INSTALL -name "avr-gcc*" || true
+
+          echo ""
+          echo "=== avr-gcc file type ==="
+          file $BINUTILS_INSTALL/bin/avr-gcc || true
 
       - name: Upload AVR Binutils Package
         uses: actions/upload-artifact@v4
@@ -268,3 +308,15 @@ jobs:
         with:
           name: avr-binutils-build
           path: work/build/binutils
+
+      - name: Upload AVR GCC Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: avr-gcc-build
+          path: work/build/gcc
+
+      - name: Upload Full Toolchain Install
+        uses: actions/upload-artifact@v4
+        with:
+          name: avr-toolchain-android-aarch64
+          path: work/build/binutils/install
