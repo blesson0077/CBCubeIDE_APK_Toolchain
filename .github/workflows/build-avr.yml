@@ -110,23 +110,6 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
-          echo "Compiler location:"
-          which aarch64-linux-android21-clang
-
-          echo ""
-          echo "Compiler version:"
-          aarch64-linux-android21-clang --version
-
-          echo ""
-          echo "AR location:"
-          which llvm-ar
-
-          echo "RANLIB location:"
-          which llvm-ranlib
-
-          echo "STRIP location:"
-          which llvm-strip
-
           cd work/build/binutils
 
           make -j$(nproc) all-binutils
@@ -140,6 +123,41 @@ jobs:
           find work/build/binutils -type f | grep "objdump" || true
           find work/build/binutils -type f | grep "objcopy" || true
           find work/build/binutils -type f | grep "/ar$" || true
+
+      - name: Install AVR Binutils
+        run: |
+          export NDK=$PWD/work/android-ndk-r27c
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+
+          export PATH=$TOOLCHAIN/bin:$PATH
+
+          export CC=aarch64-linux-android21-clang
+          export CXX=aarch64-linux-android21-clang++
+
+          export AR=llvm-ar
+          export RANLIB=llvm-ranlib
+          export STRIP=llvm-strip
+
+          cd work/build/binutils
+
+          make install-binutils
+          make install-gas
+          make install-ld
+
+      - name: Verify Installed AVR Tools
+        run: |
+          echo "Installed files:"
+          find work/build/binutils/install -type f | sort
+
+          echo ""
+          echo "Installed binaries:"
+          find work/build/binutils/install/bin -type f | sort || true
+
+      - name: Upload AVR Binutils Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: avr-binutils-install
+          path: work/build/binutils/install
 
       - name: Upload Binutils Build
         uses: actions/upload-artifact@v4
