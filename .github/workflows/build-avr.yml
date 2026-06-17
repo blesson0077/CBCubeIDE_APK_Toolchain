@@ -171,6 +171,10 @@ jobs:
           echo ""
           echo "Searching for AVR executables:"
           find work/build/binutils/install -name "*avr*" || true
+          
+      - name: Create GCC Build Directory
+        run: |
+          mkdir -p work/build/gcc
 
       - name: Upload AVR Binutils Package
         uses: actions/upload-artifact@v4
