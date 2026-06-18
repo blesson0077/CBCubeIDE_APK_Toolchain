@@ -199,7 +199,7 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
-          export CXXFLAGS="-std=c++17 -g -O2"
+          export CXXFLAGS="-g -O2"
           export CFLAGS="-g -O2"
 
           rm -rf work/build/gcc
@@ -246,7 +246,14 @@ jobs:
 
           cd work/build/gcc
 
-          make -j$(nproc) all-gcc CXXFLAGS="-std=c++17 -g -O2"
+          echo "=== Host Compiler ==="
+          which aarch64-linux-android21-clang++
+          aarch64-linux-android21-clang++ --version
+          
+          echo ""
+          echo "=== Starting GCC Build (Verbose Mode) ==="
+          
+          make all-gcc V=1
 
       - name: Verify GCC Build
         run: |
@@ -279,7 +286,7 @@ jobs:
 
           cd work/build/gcc
 
-          make install-gcc CXXFLAGS="-std=c++17 -g -O2"
+          make install-gcc
 
       - name: Verify AVR GCC Installed
         run: |
