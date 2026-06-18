@@ -199,16 +199,12 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
-          # NDK r27c libc++ requires C++17 minimum
-          export CXXFLAGS="-std=c++17 -g -O2"
-          export CFLAGS="-g -O2"
-
           rm -rf work/build/gcc
           mkdir -p work/build/gcc
 
           BINUTILS_INSTALL=$PWD/work/build/binutils/install
 
-          CONFIGURE_FLAGS="--target=avr --host=aarch64-unknown-linux-android --build=x86_64-linux-gnu --prefix=$BINUTILS_INSTALL --enable-languages=c --without-headers --disable-nls --disable-shared --disable-threads --disable-libssp --disable-libada --disable-libquadmath --disable-libgomp --disable-libstdcxx --disable-lto --disable-plugin"
+          CONFIGURE_FLAGS="--target=avr --host=aarch64-unknown-linux-android --build=x86_64-linux-gnu --prefix=$BINUTILS_INSTALL --enable-languages=c --without-headers --disable-nls --disable-shared --disable-threads --disable-libssp --disable-libada --disable-libquadmath --disable-libgomp --disable-libstdcxx --disable-lto --disable-plugin --without-isl"
 
           cd work/build/gcc
 
@@ -229,13 +225,9 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
-          # NDK r27c libc++ requires C++17 minimum
-          export CXXFLAGS="-std=c++17 -g -O2"
-          export CFLAGS="-g -O2"
-
           cd work/build/gcc
 
-          make -j$(nproc) all-gcc
+          make -j$(nproc) all-gcc CXXFLAGS="-std=c++17 -g -O2"
 
       - name: Verify GCC Build
         run: |
@@ -266,12 +258,9 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
-          export CXXFLAGS="-std=c++17 -g -O2"
-          export CFLAGS="-g -O2"
-
           cd work/build/gcc
 
-          make install-gcc
+          make install-gcc CXXFLAGS="-std=c++17 -g -O2"
 
       - name: Verify AVR GCC Installed
         run: |
