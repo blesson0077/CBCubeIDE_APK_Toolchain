@@ -191,54 +191,36 @@ jobs:
         run: |
           export NDK=$PWD/work/android-ndk-r27c
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-
           export PATH=$TOOLCHAIN/bin:$PATH
 
           export CC=aarch64-linux-android21-clang
           export CXX=aarch64-linux-android21-clang++
-
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
-          # Clean any previous GCC build
           rm -rf work/build/gcc
           mkdir -p work/build/gcc
 
           BINUTILS_INSTALL=$PWD/work/build/binutils/install
 
+          CONFIGURE_FLAGS="--target=avr --host=aarch64-unknown-linux-android --build=x86_64-linux-gnu --prefix=$BINUTILS_INSTALL --enable-languages=c --without-headers --disable-nls --disable-shared --disable-threads --disable-libssp --disable-libada --disable-libquadmath --disable-libgomp --disable-libstdcxx --disable-lto --disable-plugin"
+
           cd work/build/gcc
 
-          ../../src/gcc-12.2.0/configure \
-            --target=avr \
-            --host=aarch64-unknown-linux-android \
-            --build=x86_64-linux-gnu \
-            --prefix=$BINUTILS_INSTALL \
-            # --with-as=$BINUTILS_INSTALL/bin/avr-as \
-            # --with-ld=$BINUTILS_INSTALL/bin/avr-ld \
-            --enable-languages=c \
-            --without-headers \
-            --disable-nls \
-            --disable-shared \
-            --disable-threads \
-            --disable-libssp \
-            --disable-libada \
-            --disable-libquadmath \
-            --disable-libgomp \
-            --disable-libstdcxx \
-            --disable-lto \
-            --disable-plugin
+          echo "=== Configure flags ==="
+          echo $CONFIGURE_FLAGS
+
+          ../../src/gcc-12.2.0/configure $CONFIGURE_FLAGS
 
       - name: Build AVR GCC
         run: |
           export NDK=$PWD/work/android-ndk-r27c
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-
           export PATH=$TOOLCHAIN/bin:$PATH
 
           export CC=aarch64-linux-android21-clang
           export CXX=aarch64-linux-android21-clang++
-
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
@@ -268,12 +250,10 @@ jobs:
         run: |
           export NDK=$PWD/work/android-ndk-r27c
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-
           export PATH=$TOOLCHAIN/bin:$PATH
 
           export CC=aarch64-linux-android21-clang
           export CXX=aarch64-linux-android21-clang++
-
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
