@@ -257,27 +257,57 @@ jobs:
           g++ --version
 
           echo ""
-          echo "=== Starting GCC Build ==="
+          echo "=== PATH ==="
+          echo $PATH
 
-          make all-gcc V=1
+          echo ""
+          echo "=== Checking xgcc ==="
+          ls -lh gcc/xgcc || true
+
+          echo ""
+          echo "=== GCC executables ==="
+          find gcc -type f -executable | sort || true
+
+          echo ""
+          echo "=== Adding gcc directory to PATH ==="
+          export PATH=$PWD/gcc:$PATH
+
+          echo ""
+          echo "=== PATH AFTER UPDATE ==="
+          echo $PATH
+
+          echo ""
+          echo "=== Starting GCC Build (Verbose) ==="
+
+          make -j$(nproc) all-gcc V=1
+      
 
       - name: Dump GCC Logs On Failure
         if: failure()
         run: |
-          echo "=== Searching for error messages ==="
-
-          grep -R -n -i "error:" work/build/gcc 2>/dev/null | head -200 || true
-
-          echo ""
-          echo "=== Searching for fatal errors ==="
-
-          grep -R -n -i "fatal" work/build/gcc 2>/dev/null | head -200 || true
+          echo "=== ERROR SEARCH ==="
+          grep -R -n -i "error:" work/build/gcc | head -300 || true
 
           echo ""
-          echo "=== Searching config logs ==="
+          echo "=== FATAL SEARCH ==="
+          grep -R -n -i "fatal" work/build/gcc | head -300 || true
 
-          find work/build/gcc -name "config.log" -exec tail -100 {} \; || true
+          echo ""
+          echo "=== SPECS SEARCH ==="
+          grep -R -n "dumpspecs" work/build/gcc | head -100 || true
 
+          echo ""
+          echo "=== xgcc SEARCH ==="
+          find work/build/gcc -name xgcc || true
+
+          echo ""
+          echo "=== avr-gcc SEARCH ==="
+          find work/build/gcc -name avr-gcc || true
+
+          echo ""
+          echo "=== LAST 200 LINES OF BUILD LOGS ==="
+          find work/build/gcc -name "*.log" -exec tail -200 {} \; 2>/dev/null || true
+          
       - name: Verify GCC Build
         run: |
           echo "=== Searching for xgcc ==="
