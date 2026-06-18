@@ -21,6 +21,7 @@ jobs:
             xz-utils \
             bzip2 \
             unzip \
+            zip \
             tar \
             file \
             build-essential \
@@ -200,7 +201,6 @@ jobs:
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
 
-          # Native compiler for building GCC itself
           export CC=gcc
           export CXX=g++
           export AR=ar
@@ -399,6 +399,200 @@ jobs:
             echo "✅ CORRECT: avr-gcc is an ARM64 binary" || \
             echo "❌ WRONG: avr-gcc is NOT an ARM64 binary — check host triple"
 
+      # ─────────────────────────────────────────────
+      # PHASE 14B — Build avr-libc
+      # Uses system avr-gcc (x86_64) to compile AVR
+      # bytecode. Output .a files are pure AVR and
+      # architecture-independent — same result as if
+      # compiled by our aarch64 avr-gcc.
+      # ─────────────────────────────────────────────
+
+      - name: Configure avr-libc (Phase 14B)
+        run: |
+          BINUTILS_INSTALL=$PWD/work/build/binutils/install
+
+          mkdir -p work/build/avr-libc
+
+          echo "=== System avr-gcc version ==="
+          avr-gcc --version
+          which avr-gcc
+
+          cd work/src/avr-libc-2.1.0
+
+          ./configure \
+            --host=avr \
+            --prefix=$BINUTILS_INSTALL \
+            CC=avr-gcc \
+            2>&1 | tee $GITHUB_WORKSPACE/work/build/avr-libc/configure.log
+
+          echo ""
+          echo "=== avr-libc configure DONE ==="
+
+      - name: Build avr-libc
+        run: |
+          cd work/src/avr-libc-2.1.0
+
+          make -j$(nproc) 2>&1 | tee $GITHUB_WORKSPACE/work/build/avr-libc/build.log
+
+          EXIT_CODE=${PIPESTATUS[0]}
+
+          echo ""
+          echo "=== LAST 100 LINES ==="
+          tail -100 $GITHUB_WORKSPACE/work/build/avr-libc/build.log || true
+
+          exit $EXIT_CODE
+
+      - name: Install avr-libc
+        run: |
+          BINUTILS_INSTALL=$PWD/work/build/binutils/install
+
+          cd work/src/avr-libc-2.1.0
+
+          make install 2>&1 | tee $GITHUB_WORKSPACE/work/build/avr-libc/install.log
+
+          echo ""
+          echo "=== avr-libc installed files ==="
+          find $BINUTILS_INSTALL/avr -type f | sort || true
+
+          echo ""
+          echo "=== avr-libc headers ==="
+          find $BINUTILS_INSTALL -name "avr" -type d | sort || true
+          find $BINUTILS_INSTALL -name "*.h" | grep -i avr | head -30 || true
+
+          echo ""
+          echo "=== avr-libc libraries ==="
+          find $BINUTILS_INSTALL -name "libc.a" | sort || true
+          find $BINUTILS_INSTALL -name "libm.a" | sort || true
+
+      - name: Dump avr-libc Logs On Failure
+        if: failure()
+        run: |
+          echo "===== CONFIGURE LOG ====="
+          tail -100 work/build/avr-libc/configure.log || true
+
+          echo ""
+          echo "===== BUILD LOG ====="
+          tail -200 work/build/avr-libc/build.log || true
+
+          echo ""
+          echo "===== INSTALL LOG ====="
+          tail -100 work/build/avr-libc/install.log || true
+
+      # ─────────────────────────────────────────────
+      # PHASE 15 — Package
+      # ─────────────────────────────────────────────
+
+      - name: Inspect Full Toolchain Before Packaging (Phase 15)
+        run: |
+          BINUTILS_INSTALL=$PWD/work/build/binutils/install
+
+          echo "=== Full toolchain install tree ==="
+          find $BINUTILS_INSTALL -type f | sort
+
+          echo ""
+          echo "=== bin/ contents ==="
+          ls -lh $BINUTILS_INSTALL/bin/ || true
+
+          echo ""
+          echo "=== lib/ contents ==="
+          find $BINUTILS_INSTALL/lib -type f | sort || true
+
+          echo ""
+          echo "=== avr/ contents ==="
+          find $BINUTILS_INSTALL/avr -type f | sort || true
+
+          echo ""
+          echo "=== include/ contents ==="
+          find $BINUTILS_INSTALL/include -type f | sort || true
+
+      - name: Generate manifest.json
+        run: |
+          BINUTILS_INSTALL=$PWD/work/build/binutils/install
+
+          cat > $BINUTILS_INSTALL/manifest.json << 'EOF'
+          {
+            "name": "avr-toolchain-android-aarch64",
+            "version": "1.0.0",
+            "host": "aarch64-unknown-linux-android",
+            "target": "avr",
+            "ndk": "r27c",
+            "components": {
+              "binutils": "2.40",
+              "gcc": "12.2.0",
+              "avr-libc": "2.1.0"
+            },
+            "tools": [
+              "avr-gcc",
+              "avr-as",
+              "avr-ld",
+              "avr-ar",
+              "avr-ranlib",
+              "avr-objcopy",
+              "avr-objdump",
+              "avr-size"
+            ],
+            "built_for": "CBCubeIDE Android"
+          }
+          EOF
+
+          echo "=== manifest.json ==="
+          cat $BINUTILS_INSTALL/manifest.json
+
+      - name: Package Toolchain into ZIP
+        run: |
+          BINUTILS_INSTALL=$PWD/work/build/binutils/install
+          PACKAGE_DIR=$PWD/work/package
+          PACKAGE_NAME=avr-toolchain-android-aarch64
+
+          mkdir -p $PACKAGE_DIR/$PACKAGE_NAME
+
+          echo "=== Copying toolchain into package dir ==="
+          cp -r $BINUTILS_INSTALL/bin     $PACKAGE_DIR/$PACKAGE_NAME/bin     || true
+          cp -r $BINUTILS_INSTALL/lib     $PACKAGE_DIR/$PACKAGE_NAME/lib     || true
+          cp -r $BINUTILS_INSTALL/avr     $PACKAGE_DIR/$PACKAGE_NAME/avr     || true
+          cp -r $BINUTILS_INSTALL/include $PACKAGE_DIR/$PACKAGE_NAME/include || true
+          cp    $BINUTILS_INSTALL/manifest.json $PACKAGE_DIR/$PACKAGE_NAME/manifest.json || true
+
+          echo ""
+          echo "=== Package directory tree ==="
+          find $PACKAGE_DIR/$PACKAGE_NAME -type f | sort
+
+          echo ""
+          echo "=== Creating ZIP ==="
+          cd $PACKAGE_DIR
+          zip -r ${PACKAGE_NAME}.zip $PACKAGE_NAME/
+
+          echo ""
+          echo "=== ZIP created ==="
+          ls -lh ${PACKAGE_NAME}.zip
+
+          echo "PACKAGE_PATH=$PACKAGE_DIR/${PACKAGE_NAME}.zip" >> $GITHUB_ENV
+
+      - name: Verify Package Contents
+        run: |
+          PACKAGE_DIR=$PWD/work/package
+          PACKAGE_NAME=avr-toolchain-android-aarch64
+
+          echo "=== ZIP contents ==="
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip
+
+          echo ""
+          echo "=== Checking critical files ==="
+
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-gcc"   && echo "✅ avr-gcc present"   || echo "❌ avr-gcc MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-as"    && echo "✅ avr-as present"    || echo "❌ avr-as MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-ld"    && echo "✅ avr-ld present"    || echo "❌ avr-ld MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-ar"    && echo "✅ avr-ar present"    || echo "❌ avr-ar MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-objcopy" && echo "✅ avr-objcopy present" || echo "❌ avr-objcopy MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-objdump" && echo "✅ avr-objdump present" || echo "❌ avr-objdump MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "manifest.json" && echo "✅ manifest.json present" || echo "❌ manifest.json MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "libc.a"    && echo "✅ libc.a present"    || echo "❌ libc.a MISSING"
+          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "libm.a"    && echo "✅ libm.a present"    || echo "❌ libm.a MISSING"
+
+      # ─────────────────────────────────────────────
+      # UPLOAD ARTIFACTS
+      # ─────────────────────────────────────────────
+
       - name: Upload AVR Binutils Package
         uses: actions/upload-artifact@v4
         with:
@@ -422,3 +616,9 @@ jobs:
         with:
           name: avr-toolchain-android-aarch64
           path: work/build/binutils/install
+
+      - name: Upload Final ZIP Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: avr-toolchain-android-aarch64-zip
+          path: work/package/avr-toolchain-android-aarch64.zip
