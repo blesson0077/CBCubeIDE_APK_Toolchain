@@ -261,6 +261,23 @@ jobs:
 
           make all-gcc V=1
 
+      - name: Dump GCC Logs On Failure
+        if: failure()
+        run: |
+          echo "=== Searching for error messages ==="
+
+          grep -R -n -i "error:" work/build/gcc 2>/dev/null | head -200 || true
+
+          echo ""
+          echo "=== Searching for fatal errors ==="
+
+          grep -R -n -i "fatal" work/build/gcc 2>/dev/null | head -200 || true
+
+          echo ""
+          echo "=== Searching config logs ==="
+
+          find work/build/gcc -name "config.log" -exec tail -100 {} \; || true
+
       - name: Verify GCC Build
         run: |
           echo "=== Searching for xgcc ==="
