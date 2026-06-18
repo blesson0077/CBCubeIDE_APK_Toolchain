@@ -214,8 +214,8 @@ jobs:
             --host=aarch64-unknown-linux-android \
             --build=x86_64-linux-gnu \
             --prefix=$BINUTILS_INSTALL \
-            --with-as=$BINUTILS_INSTALL/bin/avr-as \
-            --with-ld=$BINUTILS_INSTALL/bin/avr-ld \
+            # --with-as=$BINUTILS_INSTALL/bin/avr-as \
+            # --with-ld=$BINUTILS_INSTALL/bin/avr-ld \
             --enable-languages=c \
             --without-headers \
             --disable-nls \
