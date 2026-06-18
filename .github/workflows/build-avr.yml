@@ -199,19 +199,41 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
+          # C++17 required at configure time so configure-gcc C++ probe passes
+          # GMP/MPFR/MPC are pure C — CXXFLAGS does not affect their configure
+          # --without-isl removes ISL (C++ library with deeper NDK incompatibility)
+          export CXXFLAGS="-std=c++17 -g -O2"
+          export CFLAGS="-g -O2"
+
           rm -rf work/build/gcc
           mkdir -p work/build/gcc
 
           BINUTILS_INSTALL=$PWD/work/build/binutils/install
 
-          CONFIGURE_FLAGS="--target=avr --host=aarch64-unknown-linux-android --build=x86_64-linux-gnu --prefix=$BINUTILS_INSTALL --enable-languages=c --without-headers --disable-nls --disable-shared --disable-threads --disable-libssp --disable-libada --disable-libquadmath --disable-libgomp --disable-libstdcxx --disable-lto --disable-plugin --without-isl"
+          CONFIGURE_FLAGS="--target=avr --host=aarch64-unknown-linux-android --build=x86_64-linux-gnu --prefix=$BINUTILS_INSTALL --enable-languages=c --without-headers --disable-nls --disable-shared --disable-threads --disable-libssp --disable-libada --disable-libquadmath --disable-libgomp --disable-lto --disable-plugin --without-isl"
 
           cd work/build/gcc
 
           echo "=== Configure flags ==="
           echo $CONFIGURE_FLAGS
+          echo ""
+          echo "=== CXXFLAGS ==="
+          echo $CXXFLAGS
 
-          ../../src/gcc-12.2.0/configure $CONFIGURE_FLAGS
+          if ../../src/gcc-12.2.0/configure $CONFIGURE_FLAGS; then
+            echo ""
+            echo "=== Configure SUCCEEDED ==="
+          else
+            echo ""
+            echo "=== Configure FAILED ==="
+            echo ""
+            echo "=== Top-level config.log (last 200 lines) ==="
+            tail -200 config.log || true
+            echo ""
+            echo "=== gcc sub-configure config.log (last 100 lines) ==="
+            tail -100 gcc/config.log 2>/dev/null || true
+            exit 1
+          fi
 
       - name: Build AVR GCC
         run: |
