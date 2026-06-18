@@ -199,6 +199,10 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
+          # NDK r27c libc++ requires C++17 minimum
+          export CXXFLAGS="-std=c++17 -g -O2"
+          export CFLAGS="-g -O2"
+
           rm -rf work/build/gcc
           mkdir -p work/build/gcc
 
@@ -224,6 +228,10 @@ jobs:
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
+
+          # NDK r27c libc++ requires C++17 minimum
+          export CXXFLAGS="-std=c++17 -g -O2"
+          export CFLAGS="-g -O2"
 
           cd work/build/gcc
 
@@ -257,6 +265,9 @@ jobs:
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
+
+          export CXXFLAGS="-std=c++17 -g -O2"
+          export CFLAGS="-g -O2"
 
           cd work/build/gcc
 
