@@ -262,6 +262,26 @@ jobs:
           echo ""
           echo "===== FILES NAMED collect2 ====="
           find work/build/gcc -name collect2 | sort || true
+
+
+      - name: Inspect GCC Tree
+        run: |
+          cd work/build/gcc
+      
+          echo "===== TOP LEVEL ====="
+          ls -lah
+      
+          echo ""
+          echo "===== GCC DIR ====="
+          ls -lah gcc || true
+      
+          echo ""
+          echo "===== SEARCH xgcc ====="
+          find . -name xgcc || true
+      
+          echo ""
+          echo "===== SEARCH avr-gcc ====="
+          find . -name "avr-gcc*" || true
             
       - name: Build AVR GCC
         run: |
