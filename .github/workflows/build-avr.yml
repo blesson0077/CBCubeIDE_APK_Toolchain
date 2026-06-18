@@ -265,6 +265,28 @@ jobs:
           echo "===== SYSTEM AS ====="
 
           /usr/bin/as --version || true
+
+
+      - name: Inspect GCC Build Tree
+        run: |
+          echo "===== BUILD DIRECTORY ====="
+          ls -lah work/build/gcc || true
+
+          echo ""
+          echo "===== SUBDIRECTORIES ====="
+          find work/build/gcc -maxdepth 3 -type d | sort || true
+
+          echo ""
+          echo "===== FILES NAMED as ====="
+          find work/build/gcc -name as | sort || true
+
+          echo ""
+          echo "===== FILES NAMED xgcc ====="
+          find work/build/gcc -name xgcc | sort || true
+
+          echo ""
+          echo "===== FILES NAMED collect2 ====="
+          find work/build/gcc -name collect2 | sort || true
             
       - name: Build AVR GCC
         run: |
@@ -285,52 +307,43 @@ jobs:
           echo $PATH
 
           echo ""
-          echo "=== Checking xgcc ==="
-          ls -lh gcc/xgcc || true
+          echo "=== Starting GCC Build ==="
+
+          make -j$(nproc) all-gcc V=1 2>&1 | tee gcc-build.log
+
+          EXIT_CODE=${PIPESTATUS[0]}
 
           echo ""
-          echo "=== GCC executables ==="
-          find gcc -type f -executable | sort || true
+          echo "=== LAST 300 LINES OF BUILD ==="
+          tail -300 gcc-build.log || true
 
-          echo ""
-          echo "=== Adding gcc directory to PATH ==="
-          export PATH=$PWD/gcc:$PATH
-
-          echo ""
-          echo "=== PATH AFTER UPDATE ==="
-          echo $PATH
-
-          echo ""
-          echo "=== Starting GCC Build (Verbose) ==="
-
-          make -j$(nproc) all-gcc V=1
+          exit $EXIT_CODE
       
 
       - name: Dump GCC Logs On Failure
         if: failure()
         run: |
-          echo "=== ERROR SEARCH ==="
-          grep -R -n -i "error:" work/build/gcc | head -300 || true
+          echo "===== ERROR SEARCH ====="
+          grep -R -n -i "error:" work/build/gcc 2>/dev/null | head -300 || true
 
           echo ""
-          echo "=== FATAL SEARCH ==="
-          grep -R -n -i "fatal" work/build/gcc | head -300 || true
+          echo "===== FATAL SEARCH ====="
+          grep -R -n -i "fatal" work/build/gcc 2>/dev/null | head -300 || true
 
           echo ""
-          echo "=== SPECS SEARCH ==="
-          grep -R -n "dumpspecs" work/build/gcc | head -100 || true
+          echo "===== GENERATED AS WRAPPERS ====="
+          find work/build/gcc -name as -exec ls -lh {} \; 2>/dev/null || true
 
           echo ""
-          echo "=== xgcc SEARCH ==="
-          find work/build/gcc -name xgcc || true
+          echo "===== FIRST 150 LINES OF EVERY AS WRAPPER ====="
+          find work/build/gcc -name as -exec sh -c '
+            echo "FILE: $1"
+            sed -n "1,150p" "$1"
+          ' sh {} \; 2>/dev/null || true
 
           echo ""
-          echo "=== avr-gcc SEARCH ==="
-          find work/build/gcc -name avr-gcc || true
-
-          echo ""
-          echo "=== LAST 200 LINES OF BUILD LOGS ==="
-          find work/build/gcc -name "*.log" -exec tail -200 {} \; 2>/dev/null || true
+          echo "===== LAST 300 LINES OF BUILD LOG ====="
+          tail -300 work/build/gcc/gcc-build.log 2>/dev/null || true
           
       - name: Verify GCC Build
         run: |
