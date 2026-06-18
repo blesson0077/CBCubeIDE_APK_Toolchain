@@ -199,9 +199,6 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
-          # C++17 required at configure time so configure-gcc C++ probe passes
-          # GMP/MPFR/MPC are pure C — CXXFLAGS does not affect their configure
-          # --without-isl removes ISL (C++ library with deeper NDK incompatibility)
           export CXXFLAGS="-std=c++17 -g -O2"
           export CFLAGS="-g -O2"
 
@@ -247,9 +244,21 @@ jobs:
           export RANLIB=llvm-ranlib
           export STRIP=llvm-strip
 
+          export CXXFLAGS="-std=c++17 -g -O2"
+
           cd work/build/gcc
 
-          make -j$(nproc) all-gcc CXXFLAGS="-std=c++17 -g -O2"
+          make -j1 all-gcc CXXFLAGS="-std=c++17 -g -O2" 2>&1 | tee /tmp/gcc-build.log; BUILD_EXIT=${PIPESTATUS[0]}
+
+          echo ""
+          echo "=== ERRORS FOUND ==="
+          grep -n "error:" /tmp/gcc-build.log | tail -30 || true
+
+          echo ""
+          echo "=== LAST 50 LINES ==="
+          tail -50 /tmp/gcc-build.log
+
+          exit $BUILD_EXIT
 
       - name: Verify GCC Build
         run: |
