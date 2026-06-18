@@ -242,31 +242,6 @@ jobs:
           fi
 
 
-            
-      - name: Debug GCC Assembler Wrapper
-        run: |
-          cd work/build/gcc/gcc
-
-          echo "===== GCC AS WRAPPER ====="
-
-          ls -lh as || true
-
-          echo ""
-          echo "===== FIRST 150 LINES ====="
-
-          sed -n '1,150p' as || true
-
-          echo ""
-          echo "===== WHICH AS ====="
-
-          which as || true
-
-          echo ""
-          echo "===== SYSTEM AS ====="
-
-          /usr/bin/as --version || true
-
-
       - name: Inspect GCC Build Tree
         run: |
           echo "===== BUILD DIRECTORY ====="
