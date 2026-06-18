@@ -29,7 +29,14 @@ jobs:
             texinfo \
             libgmp-dev \
             libmpfr-dev \
-            libmpc-dev
+            libmpc-dev \
+            gcc-avr
+
+      - name: Verify AVR GCC on Build Machine
+        run: |
+          echo "=== gcc-avr version (build machine, for specs generation) ==="
+          avr-gcc --version
+          which avr-gcc
 
       - name: Create Workspace
         run: |
@@ -241,7 +248,6 @@ jobs:
             exit 1
           fi
 
-
       - name: Inspect GCC Build Tree
         run: |
           echo "===== BUILD DIRECTORY ====="
@@ -263,26 +269,25 @@ jobs:
           echo "===== FILES NAMED collect2 ====="
           find work/build/gcc -name collect2 | sort || true
 
-
       - name: Inspect GCC Tree
         run: |
           cd work/build/gcc
-      
+
           echo "===== TOP LEVEL ====="
           ls -lah
-      
+
           echo ""
           echo "===== GCC DIR ====="
           ls -lah gcc || true
-      
+
           echo ""
           echo "===== SEARCH xgcc ====="
           find . -name xgcc || true
-      
+
           echo ""
           echo "===== SEARCH avr-gcc ====="
           find . -name "avr-gcc*" || true
-            
+
       - name: Build AVR GCC
         run: |
           export CC=gcc
@@ -296,6 +301,11 @@ jobs:
           echo "=== Host Compiler ==="
           which g++
           g++ --version
+
+          echo ""
+          echo "=== AVR GCC on Build Machine (for specs generation) ==="
+          which avr-gcc
+          avr-gcc --version
 
           echo ""
           echo "=== PATH ==="
@@ -313,7 +323,6 @@ jobs:
           tail -300 gcc-build.log || true
 
           exit $EXIT_CODE
-      
 
       - name: Dump GCC Logs On Failure
         if: failure()
@@ -339,7 +348,7 @@ jobs:
           echo ""
           echo "===== LAST 300 LINES OF BUILD LOG ====="
           tail -300 work/build/gcc/gcc-build.log 2>/dev/null || true
-          
+
       - name: Verify GCC Build
         run: |
           echo "=== Searching for xgcc ==="
@@ -368,7 +377,7 @@ jobs:
           cd work/build/gcc
 
           make install-gcc
-          
+
       - name: Verify AVR GCC Installed
         run: |
           BINUTILS_INSTALL=$PWD/work/build/binutils/install
@@ -383,6 +392,12 @@ jobs:
           echo ""
           echo "=== avr-gcc file type ==="
           file $BINUTILS_INSTALL/bin/avr-gcc || true
+
+          echo ""
+          echo "=== CRITICAL: Verify avr-gcc is aarch64 binary ==="
+          file $BINUTILS_INSTALL/bin/avr-gcc | grep -i "aarch64" && \
+            echo "✅ CORRECT: avr-gcc is an ARM64 binary" || \
+            echo "❌ WRONG: avr-gcc is NOT an ARM64 binary — check host triple"
 
       - name: Upload AVR Binutils Package
         uses: actions/upload-artifact@v4
