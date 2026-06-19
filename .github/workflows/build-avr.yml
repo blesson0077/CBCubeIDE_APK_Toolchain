@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Release version (e.g. v1.0.9)'
+        description: 'Release version (e.g. v1.0.10)'
         required: true
-        default: 'v1.0.9'
+        default: 'v1.0.10'
 
 jobs:
   build:
@@ -14,101 +14,129 @@ jobs:
     permissions:
       contents: write
     env:
+      NDK_VER:     r26d
+      API_LEVEL:   24
       INSTALL_DIR: ${{ github.workspace }}/avr-toolchain-out
-      DEPS_DIR:    ${{ github.workspace }}/aarch64-static-deps
-      HOST:        aarch64-linux-gnu
+      DEPS_DIR:    ${{ github.workspace }}/ndk-static-deps
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential wget xz-utils texinfo bison flex \
             cmake ninja-build python3 file zip \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
-            libc6-dev-arm64-cross \
             gcc-avr
 
-      # ── Step 1: Build GMP, MPFR, MPC statically for aarch64 ──────────────
-      # Ubuntu only ships x86_64 .a files; we must build aarch64 ones ourselves.
-      - name: Build GMP 6.3.0 (static, aarch64)
+      # ── NDK setup ─────────────────────────────────────────────────────────
+      - name: Download and configure Android NDK r26d
+        run: |
+          wget -q "https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip"
+          unzip -q "android-ndk-${NDK_VER}-linux.zip"
+
+          NDK="${{ github.workspace }}/android-ndk-${NDK_VER}"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+
+          # KEY FIX: symlink GNU ld.bfd into NDK toolchain bin dir.
+          # NDK's lld rejects GCC's misaligned AArch64 relocations (SIGSYS root cause).
+          # GNU ld.bfd is permissive about alignment and produces bionic-compatible output.
+          ln -sf /usr/bin/aarch64-linux-gnu-ld "$TC/bin/ld.bfd"
+          echo "ld.bfd -> $(readlink -f $TC/bin/ld.bfd)"
+
+          echo "CC=$TC/bin/aarch64-linux-android${API_LEVEL}-clang"    >> $GITHUB_ENV
+          echo "CXX=$TC/bin/aarch64-linux-android${API_LEVEL}-clang++" >> $GITHUB_ENV
+          echo "AR=$TC/bin/llvm-ar"                                     >> $GITHUB_ENV
+          echo "RANLIB=$TC/bin/llvm-ranlib"                             >> $GITHUB_ENV
+          echo "NM=$TC/bin/llvm-nm"                                     >> $GITHUB_ENV
+          echo "STRIP=$TC/bin/llvm-strip"                               >> $GITHUB_ENV
+          echo "NDK_TC=$TC"                                             >> $GITHUB_ENV
+          # -fuse-ld=bfd  → clang finds ld.bfd we symlinked above
+          # -static-libstdc++ → statically embed libc++, no .so to bundle
+          echo "LDFLAGS=-fuse-ld=bfd -static-libstdc++"                >> $GITHUB_ENV
+          echo "CFLAGS=-Os"                                             >> $GITHUB_ENV
+          echo "CXXFLAGS=-Os"                                           >> $GITHUB_ENV
+
+          mkdir -p "${{ env.INSTALL_DIR }}/bin" \
+                   "${{ env.INSTALL_DIR }}/etc" \
+                   "${{ env.DEPS_DIR }}"
+
+      # ── Static deps (GMP / MPFR / MPC) built with NDK clang ──────────────
+      - name: Build GMP 6.3.0 (static, NDK/bionic)
         run: |
           wget -q "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
           tar -xJf gmp-6.3.0.tar.xz
           mkdir build-gmp && cd build-gmp
           ../gmp-6.3.0/configure \
             --prefix="${{ env.DEPS_DIR }}" \
-            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
             --enable-static --disable-shared \
-            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-            CFLAGS="-Os" CXXFLAGS="-Os"
+            CFLAGS="-Os"
           make -j$(nproc) && make install
 
-      - name: Build MPFR 4.2.1 (static, aarch64)
+      - name: Build MPFR 4.2.1 (static, NDK/bionic)
         run: |
           wget -q "https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz"
           tar -xJf mpfr-4.2.1.tar.xz
           mkdir build-mpfr && cd build-mpfr
           ../mpfr-4.2.1/configure \
             --prefix="${{ env.DEPS_DIR }}" \
-            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
             --enable-static --disable-shared \
             --with-gmp="${{ env.DEPS_DIR }}" \
-            CC=aarch64-linux-gnu-gcc \
             CFLAGS="-Os"
           make -j$(nproc) && make install
 
-      - name: Build MPC 1.3.1 (static, aarch64)
+      - name: Build MPC 1.3.1 (static, NDK/bionic)
         run: |
           wget -q "https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz"
           tar -xzf mpc-1.3.1.tar.gz
           mkdir build-mpc && cd build-mpc
           ../mpc-1.3.1/configure \
             --prefix="${{ env.DEPS_DIR }}" \
-            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
             --enable-static --disable-shared \
             --with-gmp="${{ env.DEPS_DIR }}" \
             --with-mpfr="${{ env.DEPS_DIR }}" \
-            CC=aarch64-linux-gnu-gcc \
             CFLAGS="-Os"
           make -j$(nproc) && make install
 
-      # ── Step 2: Build binutils (target=avr, host=aarch64, static) ─────────
-      - name: Build binutils 2.42
+      # ── binutils ──────────────────────────────────────────────────────────
+      - name: Build binutils 2.42 (target=avr, host=aarch64-android)
         run: |
-          mkdir -p "${{ env.INSTALL_DIR }}/bin"
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
           mkdir build-binutils && cd build-binutils
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
-            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
             --disable-nls --disable-werror \
-            --disable-shared --enable-static \
-            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-            CFLAGS="-Os" CXXFLAGS="-Os" \
-            LDFLAGS="-static -L${{ env.DEPS_DIR }}/lib"
+            --disable-shared --enable-static
           make -j$(nproc) && make install
-          echo "=== binutils ==="
+          echo "=== binutils done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
-      # ── Step 3: Build GCC (target=avr, host=aarch64, static deps) ─────────
-      - name: Build GCC 12.2.0
+      # ── GCC ───────────────────────────────────────────────────────────────
+      - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
-          # Do NOT run download_prerequisites — we supply our own static deps
+          # Do NOT run download_prerequisites — we supply our own NDK-built deps
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
           ../gcc-12.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
-            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
             --enable-languages=c,c++ \
             --disable-nls --disable-libssp \
             --disable-shared --enable-static \
@@ -120,28 +148,19 @@ jobs:
             --with-gmp="${{ env.DEPS_DIR }}" \
             --with-mpfr="${{ env.DEPS_DIR }}" \
             --with-mpc="${{ env.DEPS_DIR }}" \
-            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-            AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib \
-            NM=aarch64-linux-gnu-nm STRIP=aarch64-linux-gnu-strip \
-            CFLAGS="-Os" CXXFLAGS="-Os" \
-            LDFLAGS="-static -L${{ env.DEPS_DIR }}/lib" \
             CFLAGS_FOR_TARGET="-Os"
           make -j$(nproc) all-gcc
           make install-gcc
-          echo "=== gcc ==="
+          echo "=== gcc done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
-      # ── Step 4: Build avr-libc ─────────────────────────────────────────────
+      # ── avr-libc ──────────────────────────────────────────────────────────
       - name: Build avr-libc 2.1.0
         run: |
           wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
           tar -xjf avr-libc-2.1.0.tar.bz2
           mkdir build-avr-libc && cd build-avr-libc
-          # avr-libc is compiled FOR the avr target, not for the host (aarch64).
-          # We must use the system's native x86_64 avr-gcc here — our custom
-          # aarch64 avr-gcc can't execute on the x86_64 runner.
-          # The resulting .a files are AVR machine code and are identical
-          # regardless of which host built them.
+          # avr-libc compiles FOR avr — use system x86_64 avr-gcc, not our aarch64 one
           ../avr-libc-2.1.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --host=avr --build=x86_64-linux-gnu \
@@ -149,36 +168,28 @@ jobs:
           make -j$(nproc) && make install
           echo "=== avr-libc done ==="
 
-      # ── Step 5: Build avrdude (host=aarch64, static) ──────────────────────
-      - name: Build avrdude 7.3
+      # ── avrdude ───────────────────────────────────────────────────────────
+      - name: Build avrdude 7.3 (host=aarch64-android)
         run: |
-          # Use GitHub's auto-generated archive (guaranteed to exist at this URL)
           wget -v "https://github.com/avrdudes/avrdude/archive/refs/tags/v7.3.tar.gz" \
                -O avrdude-7.3.tar.gz
           tar -xzf avrdude-7.3.tar.gz
-          # GitHub archives extract to {repo}-{tag_without_v}/ → avrdude-7.3/
           AVRDUDE_SRC=$(ls -d avrdude-*/ | head -1)
-          echo "Avrdude source dir: $AVRDUDE_SRC"
+          echo "Source: $AVRDUDE_SRC"
           mkdir build-avrdude && cd build-avrdude
-          # avrdude 7.x cmake option names: USE_LIBUSB_1_0 / USE_LIBFTDI1 / USE_LIBHIDAPI
           cmake "../$AVRDUDE_SRC" \
             -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" \
-            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER="${{ env.CC }}" \
+            -DCMAKE_CXX_COMPILER="${{ env.CXX }}" \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_SYSTEM_VERSION=${{ env.API_LEVEL }} \
+            -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+            -DCMAKE_ANDROID_NDK="${{ github.workspace }}/android-ndk-${{ env.NDK_VER }}" \
             -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -L/usr/aarch64-linux-gnu/lib" \
-            -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
-            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-            -DUSE_LIBUSB_1_0=OFF \
-            -DUSE_LIBFTDI1=OFF \
-            -DUSE_LIBHIDAPI=OFF \
-            -DUSE_LIBELF=OFF \
-            -DUSE_LINUXGPIO=OFF \
-            -DUSE_LINUXSPI=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=bfd -static-libstdc++" \
+            -DUSE_LIBUSB_1_0=OFF -DUSE_LIBFTDI1=OFF \
+            -DUSE_LIBHIDAPI=OFF -DUSE_LIBELF=OFF \
+            -DUSE_LINUXGPIO=OFF -DUSE_LINUXSPI=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=MinSizeRel
           make -j$(nproc) && make install
@@ -186,16 +197,15 @@ jobs:
             -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; 2>/dev/null || true
           echo "=== avrdude done ==="
 
-      # ── Step 6: Verify + package ───────────────────────────────────────────
+      # ── Verify + strip + package ──────────────────────────────────────────
       - name: Strip and verify binaries
         run: |
-          echo "=== Strip ==="
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
             if file "$f" | grep -q "ELF.*aarch64"; then
-              aarch64-linux-gnu-strip "$f" 2>/dev/null && echo "stripped: $(basename $f)" || true
+              "${{ env.STRIP }}" "$f" 2>/dev/null && echo "stripped: $(basename $f)" || true
             fi
           done
-          echo "=== Verify arch ==="
+          echo "=== verify ==="
           BAD=0
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
             info=$(file "$f")
@@ -204,7 +214,7 @@ jobs:
               echo "❌ WRONG ARCH: $f"; BAD=1
             fi
           done
-          [ "$BAD" = "0" ] || { echo "Aborting: wrong arch"; exit 1; }
+          [ "$BAD" = "0" ] || { echo "Wrong arch found"; exit 1; }
           echo "✅ All aarch64"
 
       - name: Write manifest.json
@@ -213,6 +223,8 @@ jobs:
           {
             "name": "avr-toolchain",
             "arch": "aarch64",
+            "abi": "aarch64-linux-android",
+            "api_level": ${{ env.API_LEVEL }},
             "version": "${{ github.event.inputs.release_version }}",
             "components": {
               "binutils": "2.42",
@@ -244,8 +256,14 @@ jobs:
           name: "AVR Toolchain ${{ github.event.inputs.release_version }} (aarch64-android)"
           body: |
             ## AVR Toolchain for Android AArch64
-            Fully statically linked — no runtime dependencies. Runs on Android ARM64 directly.
+
+            Built with Android NDK r26d (API 24). Dynamic bionic linking — no seccomp violations.
+
             ### Components
             - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
+
+            ### Architecture
+            - Host ABI: aarch64-linux-android (bionic, API 24+)
+            - Target: AVR (ATmega328P, ATmega2560, etc.)
           files: ${{ env.ASSET_NAME }}
           token: ${{ secrets.GITHUB_TOKEN }}
