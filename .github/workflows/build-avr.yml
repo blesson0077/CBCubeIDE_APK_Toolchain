@@ -27,7 +27,8 @@ jobs:
             build-essential wget xz-utils texinfo bison flex \
             cmake ninja-build python3 file zip \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+            binutils-aarch64-linux-gnu \
+            gcc-avr
 
       # ── Step 1: Build GMP, MPFR, MPC statically for aarch64 ──────────────
       # Ubuntu only ships x86_64 .a files; we must build aarch64 ones ourselves.
