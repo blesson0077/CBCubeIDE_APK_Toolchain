@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Release version (e.g. v1.0.5)'
+        description: 'Release version (e.g. v1.0.9)'
         required: true
-        default: 'v1.0.5'
+        default: 'v1.0.9'
 
 jobs:
   build:
@@ -150,10 +150,16 @@ jobs:
       # ── Step 5: Build avrdude (host=aarch64, static) ──────────────────────
       - name: Build avrdude 7.3
         run: |
-          wget -q "https://github.com/avrdudes/avrdude/releases/download/v7.3/avrdude-7.3.tar.gz"
+          # Use GitHub's auto-generated archive (guaranteed to exist at this URL)
+          wget -v "https://github.com/avrdudes/avrdude/archive/refs/tags/v7.3.tar.gz" \
+               -O avrdude-7.3.tar.gz
           tar -xzf avrdude-7.3.tar.gz
+          # GitHub archives extract to {repo}-{tag_without_v}/ → avrdude-7.3/
+          AVRDUDE_SRC=$(ls -d avrdude-*/ | head -1)
+          echo "Avrdude source dir: $AVRDUDE_SRC"
           mkdir build-avrdude && cd build-avrdude
-          cmake ../avrdude-7.3 \
+          # avrdude 7.x cmake option names: USE_LIBUSB_1_0 / USE_LIBFTDI1 / USE_LIBHIDAPI
+          cmake "../$AVRDUDE_SRC" \
             -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" \
             -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
@@ -165,7 +171,12 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
             -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-            -DHAVE_LIBUSB=OFF -DHAVE_LIBFTDI=OFF -DHAVE_LIBHIDAPI=OFF \
+            -DUSE_LIBUSB_1_0=OFF \
+            -DUSE_LIBFTDI1=OFF \
+            -DUSE_LIBHIDAPI=OFF \
+            -DUSE_LIBELF=OFF \
+            -DUSE_LINUXGPIO=OFF \
+            -DUSE_LINUXSPI=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=MinSizeRel
           make -j$(nproc) && make install
