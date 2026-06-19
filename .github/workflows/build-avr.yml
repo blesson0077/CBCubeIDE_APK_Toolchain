@@ -4,95 +4,129 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Release version (e.g. v1.0.4)'
+        description: 'Release version (e.g. v1.0.5)'
         required: true
-        default: 'v1.0.4'
+        default: 'v1.0.5'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       INSTALL_DIR: ${{ github.workspace }}/avr-toolchain-out
+      DEPS_DIR:    ${{ github.workspace }}/aarch64-static-deps
+      HOST:        aarch64-linux-gnu
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install build tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential wget xz-utils texinfo bison flex \
-            libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev \
             cmake ninja-build python3 file zip \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
-      - name: Set cross-compiler variables
+      # ── Step 1: Build GMP, MPFR, MPC statically for aarch64 ──────────────
+      # Ubuntu only ships x86_64 .a files; we must build aarch64 ones ourselves.
+      - name: Build GMP 6.3.0 (static, aarch64)
         run: |
-          echo "CC=aarch64-linux-gnu-gcc"         >> $GITHUB_ENV
-          echo "CXX=aarch64-linux-gnu-g++"        >> $GITHUB_ENV
-          echo "AR=aarch64-linux-gnu-ar"           >> $GITHUB_ENV
-          echo "RANLIB=aarch64-linux-gnu-ranlib"   >> $GITHUB_ENV
-          echo "NM=aarch64-linux-gnu-nm"           >> $GITHUB_ENV
-          echo "STRIP=aarch64-linux-gnu-strip"     >> $GITHUB_ENV
-          echo "CFLAGS=-Os"                        >> $GITHUB_ENV
-          echo "CXXFLAGS=-Os"                      >> $GITHUB_ENV
-          # Static linking — no glibc/runtime dependency, runs on Android directly
-          echo "LDFLAGS=-static"                   >> $GITHUB_ENV
-          mkdir -p "${{ env.INSTALL_DIR }}/bin" \
-                   "${{ env.INSTALL_DIR }}/lib" \
-                   "${{ env.INSTALL_DIR }}/etc"
+          wget -q "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+          tar -xJf gmp-6.3.0.tar.xz
+          mkdir build-gmp && cd build-gmp
+          ../gmp-6.3.0/configure \
+            --prefix="${{ env.DEPS_DIR }}" \
+            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --enable-static --disable-shared \
+            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+            CFLAGS="-Os" CXXFLAGS="-Os"
+          make -j$(nproc) && make install
 
-      - name: Build binutils 2.42 (target=avr, host=aarch64)
+      - name: Build MPFR 4.2.1 (static, aarch64)
         run: |
+          wget -q "https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz"
+          tar -xJf mpfr-4.2.1.tar.xz
+          mkdir build-mpfr && cd build-mpfr
+          ../mpfr-4.2.1/configure \
+            --prefix="${{ env.DEPS_DIR }}" \
+            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --enable-static --disable-shared \
+            --with-gmp="${{ env.DEPS_DIR }}" \
+            CC=aarch64-linux-gnu-gcc \
+            CFLAGS="-Os"
+          make -j$(nproc) && make install
+
+      - name: Build MPC 1.3.1 (static, aarch64)
+        run: |
+          wget -q "https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz"
+          tar -xzf mpc-1.3.1.tar.gz
+          mkdir build-mpc && cd build-mpc
+          ../mpc-1.3.1/configure \
+            --prefix="${{ env.DEPS_DIR }}" \
+            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --enable-static --disable-shared \
+            --with-gmp="${{ env.DEPS_DIR }}" \
+            --with-mpfr="${{ env.DEPS_DIR }}" \
+            CC=aarch64-linux-gnu-gcc \
+            CFLAGS="-Os"
+          make -j$(nproc) && make install
+
+      # ── Step 2: Build binutils (target=avr, host=aarch64, static) ─────────
+      - name: Build binutils 2.42
+        run: |
+          mkdir -p "${{ env.INSTALL_DIR }}/bin"
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
           mkdir build-binutils && cd build-binutils
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
-            --host=aarch64-linux-gnu \
-            --build=x86_64-linux-gnu \
-            --disable-nls \
-            --disable-werror \
-            --disable-shared \
-            --enable-static
-          make -j$(nproc)
-          make install
-          echo "=== binutils done ==="
+            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
+            --disable-nls --disable-werror \
+            --disable-shared --enable-static \
+            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+            CFLAGS="-Os" CXXFLAGS="-Os" \
+            LDFLAGS="-static -L${{ env.DEPS_DIR }}/lib"
+          make -j$(nproc) && make install
+          echo "=== binutils ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
-      - name: Build GCC 12.2.0 (target=avr, host=aarch64)
+      # ── Step 3: Build GCC (target=avr, host=aarch64, static deps) ─────────
+      - name: Build GCC 12.2.0
         run: |
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
-          cd gcc-12.2.0 && contrib/download_prerequisites && cd ..
+          # Do NOT run download_prerequisites — we supply our own static deps
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
           ../gcc-12.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
-            --host=aarch64-linux-gnu \
-            --build=x86_64-linux-gnu \
+            --host=${{ env.HOST }} --build=x86_64-linux-gnu \
             --enable-languages=c,c++ \
-            --disable-nls \
-            --disable-libssp \
-            --disable-shared \
-            --enable-static \
+            --disable-nls --disable-libssp \
+            --disable-shared --enable-static \
             --with-dwarf2 \
             --disable-install-libiberty \
-            --disable-gcov \
-            --disable-lto \
-            --disable-plugin \
-            --with-gnu-as \
-            --with-gnu-ld \
+            --disable-gcov --disable-lto --disable-plugin \
+            --with-gnu-as --with-gnu-ld \
+            --with-gmp="${{ env.DEPS_DIR }}" \
+            --with-mpfr="${{ env.DEPS_DIR }}" \
+            --with-mpc="${{ env.DEPS_DIR }}" \
+            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+            AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib \
+            NM=aarch64-linux-gnu-nm STRIP=aarch64-linux-gnu-strip \
+            CFLAGS="-Os" CXXFLAGS="-Os" \
+            LDFLAGS="-static -L${{ env.DEPS_DIR }}/lib" \
             CFLAGS_FOR_TARGET="-Os"
           make -j$(nproc) all-gcc
           make install-gcc
-          echo "=== gcc done ==="
+          echo "=== gcc ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
+      # ── Step 4: Build avr-libc ─────────────────────────────────────────────
       - name: Build avr-libc 2.1.0
         run: |
           wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
@@ -101,13 +135,12 @@ jobs:
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
           ../avr-libc-2.1.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
-            --host=avr \
-            --build=x86_64-linux-gnu
-          make -j$(nproc)
-          make install
+            --host=avr --build=x86_64-linux-gnu
+          make -j$(nproc) && make install
           echo "=== avr-libc done ==="
 
-      - name: Build avrdude 7.3 (host=aarch64, static)
+      # ── Step 5: Build avrdude (host=aarch64, static) ──────────────────────
+      - name: Build avrdude 7.3
         run: |
           wget -q "https://github.com/avrdudes/avrdude/releases/download/v7.3/avrdude-7.3.tar.gz"
           tar -xzf avrdude-7.3.tar.gz
@@ -122,40 +155,34 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
             -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-            -DHAVE_LIBUSB=OFF \
-            -DHAVE_LIBFTDI=OFF \
-            -DHAVE_LIBHIDAPI=OFF \
+            -DHAVE_LIBUSB=OFF -DHAVE_LIBFTDI=OFF -DHAVE_LIBHIDAPI=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=MinSizeRel
-          make -j$(nproc)
-          make install
-          # Copy avrdude.conf if present
-          find . -name "avrdude.conf" -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; || true
+          make -j$(nproc) && make install
+          find . -name "avrdude.conf" \
+            -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; 2>/dev/null || true
           echo "=== avrdude done ==="
 
-      - name: Strip binaries
+      # ── Step 6: Verify + package ───────────────────────────────────────────
+      - name: Strip and verify binaries
         run: |
+          echo "=== Strip ==="
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
             if file "$f" | grep -q "ELF.*aarch64"; then
-              aarch64-linux-gnu-strip "$f" 2>/dev/null || true
-              echo "Stripped: $f"
+              aarch64-linux-gnu-strip "$f" 2>/dev/null && echo "stripped: $(basename $f)" || true
             fi
           done
-
-      - name: Verify all binaries are aarch64
-        run: |
-          echo "=== Architecture verification ==="
+          echo "=== Verify arch ==="
           BAD=0
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
             info=$(file "$f")
-            echo "$(basename $f): $info"
+            echo "  $(basename $f): $info"
             if echo "$info" | grep -q "ELF" && ! echo "$info" | grep -q "aarch64"; then
-              echo "❌ WRONG ARCH: $f"
-              BAD=1
+              echo "❌ WRONG ARCH: $f"; BAD=1
             fi
           done
-          [ "$BAD" = "0" ] || { echo "ERROR: Wrong arch binaries found"; exit 1; }
-          echo "✅ All ELF binaries are aarch64"
+          [ "$BAD" = "0" ] || { echo "Aborting: wrong arch"; exit 1; }
+          echo "✅ All aarch64"
 
       - name: Write manifest.json
         run: |
@@ -176,13 +203,13 @@ jobs:
 
       - name: Package as zip
         run: |
-          ASSET_NAME="avr-toolchain-android-aarch64.zip"
+          ASSET="avr-toolchain-android-aarch64.zip"
           cd "${{ env.INSTALL_DIR }}"
-          zip -r "${{ github.workspace }}/${ASSET_NAME}" .
-          ls -lh "${{ github.workspace }}/${ASSET_NAME}"
-          echo "ASSET_NAME=${ASSET_NAME}" >> $GITHUB_ENV
+          zip -r "${{ github.workspace }}/$ASSET" .
+          ls -lh "${{ github.workspace }}/$ASSET"
+          echo "ASSET_NAME=$ASSET" >> $GITHUB_ENV
 
-      - name: Delete existing release if present
+      - name: Delete existing release
         run: gh release delete "${{ github.event.inputs.release_version }}" --yes 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -194,13 +221,8 @@ jobs:
           name: "AVR Toolchain ${{ github.event.inputs.release_version }} (aarch64-android)"
           body: |
             ## AVR Toolchain for Android AArch64
-
-            Statically linked — no runtime library dependencies. Runs on Android ARM64 directly.
-
+            Fully statically linked — no runtime dependencies. Runs on Android ARM64 directly.
             ### Components
-            - binutils 2.42
-            - GCC 12.2.0 (avr-gcc, avr-g++)
-            - avr-libc 2.1.0
-            - avrdude 7.3
+            - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
           files: ${{ env.ASSET_NAME }}
           token: ${{ secrets.GITHUB_TOKEN }}
