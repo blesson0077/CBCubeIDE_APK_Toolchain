@@ -77,22 +77,22 @@ jobs:
           echo "=== binutils done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
-      - name: Build GCC 13.2.0 (AVR, cross to aarch64-android) — stage 1 (C only)
+      - name: Build GCC 12.2.0 (AVR, cross to aarch64-android) — stage 1 (C only)
         run: |
-          wget -q "https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/gcc-13.2.0.tar.xz"
-          tar -xJf gcc-13.2.0.tar.xz
-          cd gcc-13.2.0
+          # GCC 13.x has a fundamental incompatibility with NDK's lld — its C++ code
+          # generates misaligned data sections (R_AARCH64_LDST64_ABS_LO12_NC) that lld
+          # rejects. This affects collect2, gcov, and other tools pervasively.
+          # GCC 12.2.0 does not have this issue and builds cleanly with NDK lld.
+          wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
+          tar -xJf gcc-12.2.0.tar.xz
+          cd gcc-12.2.0
           contrib/download_prerequisites
           cd ..
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
-          # NDK's lld rejects misaligned relocations in gcov.o (known GCC 13 + lld bug).
-          # --disable-gcov removes that tool entirely — we don't need it for AVR work.
-          # LDFLAGS forces lld; suppress clang unused-arg warnings that become errors.
-          export LDFLAGS="-fuse-ld=lld"
           export CFLAGS="-Os -Wno-unused-command-line-argument"
           export CXXFLAGS="-Os -Wno-unused-command-line-argument"
-          ../gcc-13.2.0/configure \
+          ../gcc-12.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
             --host=${{ env.TARGET_TRIPLE }} \
@@ -195,7 +195,7 @@ jobs:
             "version": "${{ github.event.inputs.release_version }}",
             "components": {
               "binutils": "2.42",
-              "gcc": "13.2.0",
+              "gcc": "12.2.0",
               "avr-libc": "2.1.0",
               "avrdude": "7.3"
             },
@@ -233,7 +233,7 @@ jobs:
 
             ### Components
             - binutils 2.42 (avr-as, avr-ld, avr-ar, avr-objcopy, avr-objdump, avr-size)
-            - GCC 13.2.0 (avr-gcc, avr-g++)
+            - GCC 12.2.0 (avr-gcc, avr-g++)
             - avr-libc 2.1.0
             - avrdude 7.3
 
