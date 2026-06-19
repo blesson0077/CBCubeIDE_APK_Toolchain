@@ -1,624 +1,241 @@
-name: Build AVR Toolchain
+name: Build AVR Toolchain (aarch64-android NDK)
 
 on:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release version (e.g. v1.0.1)'
+        required: true
+        default: 'v1.0.1'
 
 jobs:
-  prepare:
+  build:
     runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: r26d
+      API_LEVEL: 24
+      TARGET_TRIPLE: aarch64-linux-android
+      TARGET_TRIPLE_API: aarch64-linux-android24
+      INSTALL_DIR: ${{ github.workspace }}/avr-toolchain-out
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install build dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential wget curl xz-utils \
+            texinfo bison flex libgmp-dev libmpfr-dev libmpc-dev \
+            zlib1g-dev libusb-dev libftdi-dev cmake ninja-build \
+            python3 file
 
-          sudo apt-get install -y \
-            wget \
-            curl \
-            xz-utils \
-            bzip2 \
-            unzip \
-            zip \
-            tar \
-            file \
-            build-essential \
-            flex \
-            bison \
-            texinfo \
-            libgmp-dev \
-            libmpfr-dev \
-            libmpc-dev \
-            gcc-avr
-
-      - name: Verify AVR GCC on Build Machine
+      - name: Download Android NDK ${{ env.NDK_VERSION }}
         run: |
-          echo "=== gcc-avr version (build machine, for specs generation) ==="
-          avr-gcc --version
-          which avr-gcc
+          wget -q "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          unzip -q "android-ndk-${NDK_VERSION}-linux.zip"
+          echo "NDK_HOME=${{ github.workspace }}/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
 
-      - name: Create Workspace
+      - name: Set up NDK toolchain variables
         run: |
-          mkdir -p work/src
-          mkdir -p work/build
+          NDK="${{ github.workspace }}/android-ndk-${NDK_VERSION}"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "CC=$TOOLCHAIN/bin/${{ env.TARGET_TRIPLE_API }}-clang"       >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/${{ env.TARGET_TRIPLE_API }}-clang++"    >> $GITHUB_ENV
+          echo "AR=$TOOLCHAIN/bin/llvm-ar"                                   >> $GITHUB_ENV
+          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib"                           >> $GITHUB_ENV
+          echo "STRIP=$TOOLCHAIN/bin/llvm-strip"                             >> $GITHUB_ENV
+          echo "NM=$TOOLCHAIN/bin/llvm-nm"                                   >> $GITHUB_ENV
+          echo "TOOLCHAIN_BIN=$TOOLCHAIN/bin"                                >> $GITHUB_ENV
+          mkdir -p "${{ env.INSTALL_DIR }}/bin" "${{ env.INSTALL_DIR }}/lib" "${{ env.INSTALL_DIR }}/etc"
 
-      - name: Download Sources
+      - name: Build binutils 2.42 (AVR, cross to aarch64-android)
         run: |
-          cd work/src
-
-          wget -nc https://ftp.gnu.org/gnu/binutils/binutils-2.40.tar.xz
-          wget -nc https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz
-          wget -nc https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2
-
-      - name: Extract Sources
-        run: |
-          cd work/src
-
-          [ -d binutils-2.40 ] || tar -xf binutils-2.40.tar.xz
-          [ -d gcc-12.2.0 ] || tar -xf gcc-12.2.0.tar.xz
-          [ -d avr-libc-2.1.0 ] || tar -xf avr-libc-2.1.0.tar.bz2
-
-      - name: Download GCC Prerequisites
-        run: |
-          cd work/src/gcc-12.2.0
-
-          chmod +x contrib/download_prerequisites
-
-          ./contrib/download_prerequisites
-
-          echo "Downloaded GCC prerequisites:"
-          ls -lh
-
-      - name: Download Android NDK
-        run: |
-          cd work
-
-          wget -nc https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
-
-          if [ ! -d android-ndk-r27c ]; then
-            unzip -q android-ndk-r27c-linux.zip
-          fi
-
-      - name: Configure Android Toolchain
-        run: |
-          export NDK=$PWD/work/android-ndk-r27c
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
-
-          echo "Android Clang:"
-          aarch64-linux-android21-clang --version
-
-      - name: Create Binutils Build Directory
-        run: |
-          mkdir -p work/build/binutils
-
-      - name: Configure AVR Binutils
-        run: |
-          export NDK=$PWD/work/android-ndk-r27c
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-
-          export PATH=$TOOLCHAIN/bin:$PATH
-
-          export CC=aarch64-linux-android21-clang
-          export CXX=aarch64-linux-android21-clang++
-
-          export AR=llvm-ar
-          export RANLIB=llvm-ranlib
-          export STRIP=llvm-strip
-
-          cd work/build/binutils
-
-          ../../src/binutils-2.40/configure \
+          wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
+          tar -xJf binutils-2.42.tar.xz
+          mkdir build-binutils && cd build-binutils
+          ../binutils-2.42/configure \
+            --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
-            --host=aarch64-unknown-linux-android \
+            --host=${{ env.TARGET_TRIPLE }} \
             --build=x86_64-linux-gnu \
-            --prefix=$PWD/install \
             --disable-nls \
-            --disable-werror
+            --disable-werror \
+            --disable-shared \
+            --enable-static \
+            CC="${{ env.CC }}" \
+            CXX="${{ env.CXX }}" \
+            AR="${{ env.AR }}" \
+            RANLIB="${{ env.RANLIB }}" \
+            NM="${{ env.NM }}" \
+            STRIP="${{ env.STRIP }}" \
+            CFLAGS="-Os" \
+            CXXFLAGS="-Os"
+          make -j$(nproc)
+          make install
+          echo "=== binutils done ==="
+          ls "${{ env.INSTALL_DIR }}/bin/"
 
-      - name: Build AVR Binutils
+      - name: Build GCC 13.2.0 (AVR, cross to aarch64-android) — stage 1 (C only)
         run: |
-          export NDK=$PWD/work/android-ndk-r27c
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          wget -q "https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/gcc-13.2.0.tar.xz"
+          tar -xJf gcc-13.2.0.tar.xz
+          cd gcc-13.2.0
+          contrib/download_prerequisites
+          cd ..
+          mkdir build-gcc && cd build-gcc
+          # PATH must include our just-built avr-binutils so GCC configure finds avr-as etc
+          export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
+          ../gcc-13.2.0/configure \
+            --prefix="${{ env.INSTALL_DIR }}" \
+            --target=avr \
+            --host=${{ env.TARGET_TRIPLE }} \
+            --build=x86_64-linux-gnu \
+            --enable-languages=c,c++ \
+            --disable-nls \
+            --disable-libssp \
+            --disable-shared \
+            --enable-static \
+            --with-dwarf2 \
+            --disable-install-libiberty \
+            --with-gnu-as \
+            --with-gnu-ld \
+            CC="${{ env.CC }}" \
+            CXX="${{ env.CXX }}" \
+            AR="${{ env.AR }}" \
+            RANLIB="${{ env.RANLIB }}" \
+            NM="${{ env.NM }}" \
+            STRIP="${{ env.STRIP }}" \
+            CFLAGS="-Os" \
+            CXXFLAGS="-Os" \
+            CFLAGS_FOR_TARGET="-Os" \
+            CXXFLAGS_FOR_TARGET="-Os"
+          make -j$(nproc) all-gcc
+          make install-gcc
+          echo "=== gcc done ==="
+          ls "${{ env.INSTALL_DIR }}/bin/"
 
-          export PATH=$TOOLCHAIN/bin:$PATH
-
-          export CC=aarch64-linux-android21-clang
-          export CXX=aarch64-linux-android21-clang++
-
-          export AR=llvm-ar
-          export RANLIB=llvm-ranlib
-          export STRIP=llvm-strip
-
-          echo "Compiler location:"
-          which aarch64-linux-android21-clang
-
-          echo ""
-          echo "Compiler version:"
-          aarch64-linux-android21-clang --version
-
-          echo ""
-          echo "AR location:"
-          which llvm-ar
-
-          echo "RANLIB location:"
-          which llvm-ranlib
-
-          echo "STRIP location:"
-          which llvm-strip
-
-          cd work/build/binutils
-
-          make -j$(nproc) all-binutils
-
-      - name: Verify AVR Tools
+      - name: Build avr-libc 2.1.0
         run: |
-          echo "Searching for generated binaries..."
+          wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
+          tar -xjf avr-libc-2.1.0.tar.bz2
+          mkdir build-avr-libc && cd build-avr-libc
+          export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
+          ../avr-libc-2.1.0/configure \
+            --prefix="${{ env.INSTALL_DIR }}" \
+            --host=avr \
+            --build=x86_64-linux-gnu
+          make -j$(nproc)
+          make install
+          echo "=== avr-libc done ==="
 
-          find work/build/binutils -type f | grep "as-new" || true
-          find work/build/binutils -type f | grep "ld-new" || true
-          find work/build/binutils -type f | grep "objdump" || true
-          find work/build/binutils -type f | grep "objcopy" || true
-          find work/build/binutils -type f | grep "/ar$" || true
-
-      - name: Install AVR Binutils
+      - name: Build avrdude 7.3 (cross to aarch64-android)
         run: |
-          export NDK=$PWD/work/android-ndk-r27c
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          wget -q "https://github.com/avrdudes/avrdude/releases/download/v7.3/avrdude-7.3.tar.gz"
+          tar -xzf avrdude-7.3.tar.gz
+          mkdir build-avrdude && cd build-avrdude
+          cmake ../avrdude-7.3 \
+            -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" \
+            -DCMAKE_C_COMPILER="${{ env.CC }}" \
+            -DCMAKE_CXX_COMPILER="${{ env.CXX }}" \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_ANDROID_API=${{ env.API_LEVEL }} \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DHAVE_LIBUSB=OFF \
+            -DHAVE_LIBFTDI=OFF \
+            -DHAVE_LIBHIDAPI=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=MinSizeRel
+          make -j$(nproc)
+          make install
+          echo "=== avrdude done ==="
 
-          export PATH=$TOOLCHAIN/bin:$PATH
-
-          export CC=aarch64-linux-android21-clang
-          export CXX=aarch64-linux-android21-clang++
-
-          export AR=llvm-ar
-          export RANLIB=llvm-ranlib
-          export STRIP=llvm-strip
-
-          cd work/build/binutils
-
-          make install-binutils
-          make install-gas
-
-      - name: Verify Installed AVR Tools
+      - name: Strip binaries
         run: |
-          echo "Installed AVR files:"
-          find work/build/binutils/install -type f | sort
+          export PATH="${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          for f in "${{ env.INSTALL_DIR }}/bin"/*; do
+            if file "$f" | grep -q "ELF.*aarch64"; then
+              echo "Stripping $f"
+              llvm-strip "$f" || true
+            fi
+          done
 
-          echo ""
-          echo "Installed AVR bin directory:"
-          ls -lh work/build/binutils/install/bin || true
-
-          echo ""
-          echo "Searching for AVR executables:"
-          find work/build/binutils/install -name "*avr*" || true
-
-      - name: Configure AVR GCC
+      - name: Verify all binaries are aarch64
         run: |
-          export NDK=$PWD/work/android-ndk-r27c
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
-
-          export CC=gcc
-          export CXX=g++
-          export AR=ar
-          export RANLIB=ranlib
-          export STRIP=strip
-
-          export CXXFLAGS="-g -O2"
-          export CFLAGS="-g -O2"
-
-          rm -rf work/build/gcc
-          mkdir -p work/build/gcc
-
-          BINUTILS_INSTALL=$PWD/work/build/binutils/install
-
-          CONFIGURE_FLAGS="\
-          --target=avr \
-          --host=aarch64-unknown-linux-android \
-          --build=x86_64-linux-gnu \
-          --prefix=$BINUTILS_INSTALL \
-          --enable-languages=c \
-          --without-headers \
-          --disable-nls \
-          --disable-shared \
-          --disable-threads \
-          --disable-libssp \
-          --disable-libada \
-          --disable-libquadmath \
-          --disable-libgomp \
-          --disable-lto \
-          --disable-plugin \
-          --without-isl \
-          --disable-libcody"
-
-          cd work/build/gcc
-
-          echo "=== Configure flags ==="
-          echo $CONFIGURE_FLAGS
-
-          if ../../src/gcc-12.2.0/configure $CONFIGURE_FLAGS; then
-            echo "=== Configure SUCCEEDED ==="
-          else
-            echo "=== Configure FAILED ==="
-            tail -200 config.log || true
-            tail -100 gcc/config.log 2>/dev/null || true
+          echo "=== Architecture verification ==="
+          BAD=0
+          for f in "${{ env.INSTALL_DIR }}/bin"/*; do
+            info=$(file "$f")
+            echo "$f: $info"
+            if echo "$info" | grep -q "ELF" && ! echo "$info" | grep -q "aarch64"; then
+              echo "❌ WRONG ARCH: $f"
+              BAD=1
+            fi
+          done
+          if [ "$BAD" = "1" ]; then
+            echo "ERROR: Some binaries are not aarch64. Aborting."
             exit 1
           fi
+          echo "✅ All ELF binaries are aarch64"
 
-      - name: Inspect GCC Build Tree
+      - name: Write manifest.json
         run: |
-          echo "===== BUILD DIRECTORY ====="
-          ls -lah work/build/gcc || true
-
-          echo ""
-          echo "===== SUBDIRECTORIES ====="
-          find work/build/gcc -maxdepth 3 -type d | sort || true
-
-          echo ""
-          echo "===== FILES NAMED as ====="
-          find work/build/gcc -name as | sort || true
-
-          echo ""
-          echo "===== FILES NAMED xgcc ====="
-          find work/build/gcc -name xgcc | sort || true
-
-          echo ""
-          echo "===== FILES NAMED collect2 ====="
-          find work/build/gcc -name collect2 | sort || true
-
-      - name: Inspect GCC Tree
-        run: |
-          cd work/build/gcc
-
-          echo "===== TOP LEVEL ====="
-          ls -lah
-
-          echo ""
-          echo "===== GCC DIR ====="
-          ls -lah gcc || true
-
-          echo ""
-          echo "===== SEARCH xgcc ====="
-          find . -name xgcc || true
-
-          echo ""
-          echo "===== SEARCH avr-gcc ====="
-          find . -name "avr-gcc*" || true
-
-      - name: Build AVR GCC
-        run: |
-          export CC=gcc
-          export CXX=g++
-          export AR=ar
-          export RANLIB=ranlib
-          export STRIP=strip
-
-          cd work/build/gcc
-
-          echo "=== Host Compiler ==="
-          which g++
-          g++ --version
-
-          echo ""
-          echo "=== AVR GCC on Build Machine (for specs generation) ==="
-          which avr-gcc
-          avr-gcc --version
-
-          echo ""
-          echo "=== PATH ==="
-          echo $PATH
-
-          echo ""
-          echo "=== Starting GCC Build ==="
-
-          make -j$(nproc) all-gcc V=1 2>&1 | tee gcc-build.log
-
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          echo ""
-          echo "=== LAST 300 LINES OF BUILD ==="
-          tail -300 gcc-build.log || true
-
-          exit $EXIT_CODE
-
-      - name: Dump GCC Logs On Failure
-        if: failure()
-        run: |
-          echo "===== ERROR SEARCH ====="
-          grep -R -n -i "error:" work/build/gcc 2>/dev/null | head -300 || true
-
-          echo ""
-          echo "===== FATAL SEARCH ====="
-          grep -R -n -i "fatal" work/build/gcc 2>/dev/null | head -300 || true
-
-          echo ""
-          echo "===== GENERATED AS WRAPPERS ====="
-          find work/build/gcc -name as -exec ls -lh {} \; 2>/dev/null || true
-
-          echo ""
-          echo "===== FIRST 150 LINES OF EVERY AS WRAPPER ====="
-          find work/build/gcc -name as -exec sh -c '
-            echo "FILE: $1"
-            sed -n "1,150p" "$1"
-          ' sh {} \; 2>/dev/null || true
-
-          echo ""
-          echo "===== LAST 300 LINES OF BUILD LOG ====="
-          tail -300 work/build/gcc/gcc-build.log 2>/dev/null || true
-
-      - name: Verify GCC Build
-        run: |
-          echo "=== Searching for xgcc ==="
-          find work/build/gcc -name "xgcc" || true
-
-          echo ""
-          echo "=== Searching for cc1 ==="
-          find work/build/gcc -name "cc1" || true
-
-          echo ""
-          echo "=== Searching for cc1plus (should NOT exist) ==="
-          find work/build/gcc -name "cc1plus" || true
-
-          echo ""
-          echo "=== All GCC build executables ==="
-          find work/build/gcc/gcc -type f -executable 2>/dev/null | sort || true
-
-      - name: Install AVR GCC
-        run: |
-          export CC=gcc
-          export CXX=g++
-          export AR=ar
-          export RANLIB=ranlib
-          export STRIP=strip
-
-          cd work/build/gcc
-
-          make install-gcc
-
-      - name: Verify AVR GCC Installed
-        run: |
-          BINUTILS_INSTALL=$PWD/work/build/binutils/install
-
-          echo "=== AVR bin directory ==="
-          ls -lh $BINUTILS_INSTALL/bin/ || true
-
-          echo ""
-          echo "=== Searching for avr-gcc ==="
-          find $BINUTILS_INSTALL -name "avr-gcc*" || true
-
-          echo ""
-          echo "=== avr-gcc file type ==="
-          file $BINUTILS_INSTALL/bin/avr-gcc || true
-
-          echo ""
-          echo "=== CRITICAL: Verify avr-gcc is aarch64 binary ==="
-          file $BINUTILS_INSTALL/bin/avr-gcc | grep -i "aarch64" && \
-            echo "✅ CORRECT: avr-gcc is an ARM64 binary" || \
-            echo "❌ WRONG: avr-gcc is NOT an ARM64 binary — check host triple"
-
-      # ─────────────────────────────────────────────
-      # PHASE 14B — Build avr-libc
-      # Uses system avr-gcc (x86_64) to compile AVR
-      # bytecode. Output .a files are pure AVR and
-      # architecture-independent — same result as if
-      # compiled by our aarch64 avr-gcc.
-      # ─────────────────────────────────────────────
-
-      - name: Configure avr-libc (Phase 14B)
-        run: |
-          BINUTILS_INSTALL=$PWD/work/build/binutils/install
-
-          mkdir -p work/build/avr-libc
-
-          echo "=== System avr-gcc version ==="
-          avr-gcc --version
-          which avr-gcc
-
-          cd work/src/avr-libc-2.1.0
-
-          ./configure \
-            --host=avr \
-            --prefix=$BINUTILS_INSTALL \
-            CC=avr-gcc \
-            2>&1 | tee $GITHUB_WORKSPACE/work/build/avr-libc/configure.log
-
-          echo ""
-          echo "=== avr-libc configure DONE ==="
-
-      - name: Build avr-libc
-        run: |
-          cd work/src/avr-libc-2.1.0
-
-          make -j$(nproc) 2>&1 | tee $GITHUB_WORKSPACE/work/build/avr-libc/build.log
-
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          echo ""
-          echo "=== LAST 100 LINES ==="
-          tail -100 $GITHUB_WORKSPACE/work/build/avr-libc/build.log || true
-
-          exit $EXIT_CODE
-
-      - name: Install avr-libc
-        run: |
-          BINUTILS_INSTALL=$PWD/work/build/binutils/install
-
-          cd work/src/avr-libc-2.1.0
-
-          make install 2>&1 | tee $GITHUB_WORKSPACE/work/build/avr-libc/install.log
-
-          echo ""
-          echo "=== avr-libc installed files ==="
-          find $BINUTILS_INSTALL/avr -type f | sort || true
-
-          echo ""
-          echo "=== avr-libc headers ==="
-          find $BINUTILS_INSTALL -name "avr" -type d | sort || true
-          find $BINUTILS_INSTALL -name "*.h" | grep -i avr | head -30 || true
-
-          echo ""
-          echo "=== avr-libc libraries ==="
-          find $BINUTILS_INSTALL -name "libc.a" | sort || true
-          find $BINUTILS_INSTALL -name "libm.a" | sort || true
-
-      - name: Dump avr-libc Logs On Failure
-        if: failure()
-        run: |
-          echo "===== CONFIGURE LOG ====="
-          tail -100 work/build/avr-libc/configure.log || true
-
-          echo ""
-          echo "===== BUILD LOG ====="
-          tail -200 work/build/avr-libc/build.log || true
-
-          echo ""
-          echo "===== INSTALL LOG ====="
-          tail -100 work/build/avr-libc/install.log || true
-
-      # ─────────────────────────────────────────────
-      # PHASE 15 — Package
-      # ─────────────────────────────────────────────
-
-      - name: Inspect Full Toolchain Before Packaging (Phase 15)
-        run: |
-          BINUTILS_INSTALL=$PWD/work/build/binutils/install
-
-          echo "=== Full toolchain install tree ==="
-          find $BINUTILS_INSTALL -type f | sort
-
-          echo ""
-          echo "=== bin/ contents ==="
-          ls -lh $BINUTILS_INSTALL/bin/ || true
-
-          echo ""
-          echo "=== lib/ contents ==="
-          find $BINUTILS_INSTALL/lib -type f | sort || true
-
-          echo ""
-          echo "=== avr/ contents ==="
-          find $BINUTILS_INSTALL/avr -type f | sort || true
-
-          echo ""
-          echo "=== include/ contents ==="
-          find $BINUTILS_INSTALL/include -type f | sort || true
-
-      - name: Generate manifest.json
-        run: |
-          BINUTILS_INSTALL=$PWD/work/build/binutils/install
-
-          cat > $BINUTILS_INSTALL/manifest.json << 'EOF'
+          cat > "${{ env.INSTALL_DIR }}/manifest.json" <<EOF
           {
-            "name": "avr-toolchain-android-aarch64",
-            "version": "1.0.0",
-            "host": "aarch64-unknown-linux-android",
-            "target": "avr",
-            "ndk": "r27c",
+            "name": "avr-toolchain",
+            "arch": "aarch64",
+            "abi": "aarch64-linux-android",
+            "api_level": ${{ env.API_LEVEL }},
+            "version": "${{ github.event.inputs.release_version }}",
             "components": {
-              "binutils": "2.40",
-              "gcc": "12.2.0",
-              "avr-libc": "2.1.0"
+              "binutils": "2.42",
+              "gcc": "13.2.0",
+              "avr-libc": "2.1.0",
+              "avrdude": "7.3"
             },
-            "tools": [
-              "avr-gcc",
-              "avr-as",
-              "avr-ld",
-              "avr-ar",
-              "avr-ranlib",
-              "avr-objcopy",
-              "avr-objdump",
-              "avr-size"
-            ],
-            "built_for": "CBCubeIDE Android"
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
+          cat "${{ env.INSTALL_DIR }}/manifest.json"
 
-          echo "=== manifest.json ==="
-          cat $BINUTILS_INSTALL/manifest.json
-
-      - name: Package Toolchain into ZIP
+      - name: Package as zip
         run: |
-          BINUTILS_INSTALL=$PWD/work/build/binutils/install
-          PACKAGE_DIR=$PWD/work/package
-          PACKAGE_NAME=avr-toolchain-android-aarch64
+          VERSION="${{ github.event.inputs.release_version }}"
+          ASSET_NAME="avr-toolchain-android-aarch64.zip"
+          cd "${{ env.INSTALL_DIR }}"
+          zip -r "${{ github.workspace }}/${ASSET_NAME}" .
+          ls -lh "${{ github.workspace }}/${ASSET_NAME}"
+          echo "ASSET_NAME=${ASSET_NAME}" >> $GITHUB_ENV
 
-          mkdir -p $PACKAGE_DIR/$PACKAGE_NAME
-
-          echo "=== Copying toolchain into package dir ==="
-          cp -r $BINUTILS_INSTALL/bin     $PACKAGE_DIR/$PACKAGE_NAME/bin     || true
-          cp -r $BINUTILS_INSTALL/lib     $PACKAGE_DIR/$PACKAGE_NAME/lib     || true
-          cp -r $BINUTILS_INSTALL/avr     $PACKAGE_DIR/$PACKAGE_NAME/avr     || true
-          cp -r $BINUTILS_INSTALL/include $PACKAGE_DIR/$PACKAGE_NAME/include || true
-          cp    $BINUTILS_INSTALL/manifest.json $PACKAGE_DIR/$PACKAGE_NAME/manifest.json || true
-
-          echo ""
-          echo "=== Package directory tree ==="
-          find $PACKAGE_DIR/$PACKAGE_NAME -type f | sort
-
-          echo ""
-          echo "=== Creating ZIP ==="
-          cd $PACKAGE_DIR
-          zip -r ${PACKAGE_NAME}.zip $PACKAGE_NAME/
-
-          echo ""
-          echo "=== ZIP created ==="
-          ls -lh ${PACKAGE_NAME}.zip
-
-          echo "PACKAGE_PATH=$PACKAGE_DIR/${PACKAGE_NAME}.zip" >> $GITHUB_ENV
-
-      - name: Verify Package Contents
+      - name: Delete existing release if it exists
         run: |
-          PACKAGE_DIR=$PWD/work/package
-          PACKAGE_NAME=avr-toolchain-android-aarch64
+          VERSION="${{ github.event.inputs.release_version }}"
+          gh release delete "$VERSION" --yes 2>/dev/null || true
+          git push origin --delete "refs/tags/$VERSION" 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          echo "=== ZIP contents ==="
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip
-
-          echo ""
-          echo "=== Checking critical files ==="
-
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-gcc"   && echo "✅ avr-gcc present"   || echo "❌ avr-gcc MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-as"    && echo "✅ avr-as present"    || echo "❌ avr-as MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-ld"    && echo "✅ avr-ld present"    || echo "❌ avr-ld MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-ar"    && echo "✅ avr-ar present"    || echo "❌ avr-ar MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-objcopy" && echo "✅ avr-objcopy present" || echo "❌ avr-objcopy MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "avr-objdump" && echo "✅ avr-objdump present" || echo "❌ avr-objdump MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "manifest.json" && echo "✅ manifest.json present" || echo "❌ manifest.json MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "libc.a"    && echo "✅ libc.a present"    || echo "❌ libc.a MISSING"
-          unzip -l $PACKAGE_DIR/${PACKAGE_NAME}.zip | grep "libm.a"    && echo "✅ libm.a present"    || echo "❌ libm.a MISSING"
-
-      # ─────────────────────────────────────────────
-      # UPLOAD ARTIFACTS
-      # ─────────────────────────────────────────────
-
-      - name: Upload AVR Binutils Package
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: avr-binutils-install
-          path: work/build/binutils/install
+          tag_name: ${{ github.event.inputs.release_version }}
+          name: "AVR Toolchain ${{ github.event.inputs.release_version }} (aarch64-android)"
+          body: |
+            ## AVR Toolchain for Android AArch64
 
-      - name: Upload Binutils Build
-        uses: actions/upload-artifact@v4
-        with:
-          name: avr-binutils-build
-          path: work/build/binutils
+            Built with Android NDK ${{ env.NDK_VERSION }}, API level ${{ env.API_LEVEL }}.
 
-      - name: Upload AVR GCC Build
-        uses: actions/upload-artifact@v4
-        with:
-          name: avr-gcc-build
-          path: work/build/gcc
+            ### Components
+            - binutils 2.42 (avr-as, avr-ld, avr-ar, avr-objcopy, avr-objdump, avr-size)
+            - GCC 13.2.0 (avr-gcc, avr-g++)
+            - avr-libc 2.1.0
+            - avrdude 7.3
 
-      - name: Upload Full Toolchain Install
-        uses: actions/upload-artifact@v4
-        with:
-          name: avr-toolchain-android-aarch64
-          path: work/build/binutils/install
-
-      - name: Upload Final ZIP Package
-        uses: actions/upload-artifact@v4
-        with:
-          name: avr-toolchain-android-aarch64-zip
-          path: work/package/avr-toolchain-android-aarch64.zip
+            ### Architecture
+            - Target host: `aarch64-linux-android` (Android ARM64)
+            - Compiles for: AVR (ATmega328P, ATmega2560, etc.)
+          files: ${{ env.ASSET_NAME }}
+          token: ${{ secrets.GITHUB_TOKEN }}
