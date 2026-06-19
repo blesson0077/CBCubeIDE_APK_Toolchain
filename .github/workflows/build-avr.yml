@@ -4,18 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Release version (e.g. v1.0.1)'
+        description: 'Release version (e.g. v1.0.4)'
         required: true
-        default: 'v1.0.1'
+        default: 'v1.0.4'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      NDK_VERSION: r26d
-      API_LEVEL: 24
-      TARGET_TRIPLE: aarch64-linux-android
-      TARGET_TRIPLE_API: aarch64-linux-android24
       INSTALL_DIR: ${{ github.workspace }}/avr-toolchain-out
 
     steps:
@@ -26,31 +22,29 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            build-essential wget curl xz-utils \
-            texinfo bison flex libgmp-dev libmpfr-dev libmpc-dev \
-            zlib1g-dev libusb-dev libftdi-dev cmake ninja-build \
-            python3 file
+            build-essential wget xz-utils texinfo bison flex \
+            libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev \
+            cmake ninja-build python3 file zip \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
 
-      - name: Download Android NDK ${{ env.NDK_VERSION }}
+      - name: Set cross-compiler variables
         run: |
-          wget -q "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
-          unzip -q "android-ndk-${NDK_VERSION}-linux.zip"
-          echo "NDK_HOME=${{ github.workspace }}/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "CC=aarch64-linux-gnu-gcc"         >> $GITHUB_ENV
+          echo "CXX=aarch64-linux-gnu-g++"        >> $GITHUB_ENV
+          echo "AR=aarch64-linux-gnu-ar"           >> $GITHUB_ENV
+          echo "RANLIB=aarch64-linux-gnu-ranlib"   >> $GITHUB_ENV
+          echo "NM=aarch64-linux-gnu-nm"           >> $GITHUB_ENV
+          echo "STRIP=aarch64-linux-gnu-strip"     >> $GITHUB_ENV
+          echo "CFLAGS=-Os"                        >> $GITHUB_ENV
+          echo "CXXFLAGS=-Os"                      >> $GITHUB_ENV
+          # Static linking — no glibc/runtime dependency, runs on Android directly
+          echo "LDFLAGS=-static"                   >> $GITHUB_ENV
+          mkdir -p "${{ env.INSTALL_DIR }}/bin" \
+                   "${{ env.INSTALL_DIR }}/lib" \
+                   "${{ env.INSTALL_DIR }}/etc"
 
-      - name: Set up NDK toolchain variables
-        run: |
-          NDK="${{ github.workspace }}/android-ndk-${NDK_VERSION}"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          echo "CC=$TOOLCHAIN/bin/${{ env.TARGET_TRIPLE_API }}-clang"       >> $GITHUB_ENV
-          echo "CXX=$TOOLCHAIN/bin/${{ env.TARGET_TRIPLE_API }}-clang++"    >> $GITHUB_ENV
-          echo "AR=$TOOLCHAIN/bin/llvm-ar"                                   >> $GITHUB_ENV
-          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib"                           >> $GITHUB_ENV
-          echo "STRIP=$TOOLCHAIN/bin/llvm-strip"                             >> $GITHUB_ENV
-          echo "NM=$TOOLCHAIN/bin/llvm-nm"                                   >> $GITHUB_ENV
-          echo "TOOLCHAIN_BIN=$TOOLCHAIN/bin"                                >> $GITHUB_ENV
-          mkdir -p "${{ env.INSTALL_DIR }}/bin" "${{ env.INSTALL_DIR }}/lib" "${{ env.INSTALL_DIR }}/etc"
-
-      - name: Build binutils 2.42 (AVR, cross to aarch64-android)
+      - name: Build binutils 2.42 (target=avr, host=aarch64)
         run: |
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
@@ -58,44 +52,28 @@ jobs:
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
-            --host=${{ env.TARGET_TRIPLE }} \
+            --host=aarch64-linux-gnu \
             --build=x86_64-linux-gnu \
             --disable-nls \
             --disable-werror \
             --disable-shared \
-            --enable-static \
-            CC="${{ env.CC }}" \
-            CXX="${{ env.CXX }}" \
-            AR="${{ env.AR }}" \
-            RANLIB="${{ env.RANLIB }}" \
-            NM="${{ env.NM }}" \
-            STRIP="${{ env.STRIP }}" \
-            CFLAGS="-Os" \
-            CXXFLAGS="-Os"
+            --enable-static
           make -j$(nproc)
           make install
           echo "=== binutils done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
-      - name: Build GCC 12.2.0 (AVR, cross to aarch64-android) — stage 1 (C only)
+      - name: Build GCC 12.2.0 (target=avr, host=aarch64)
         run: |
-          # GCC 13.x has a fundamental incompatibility with NDK's lld — its C++ code
-          # generates misaligned data sections (R_AARCH64_LDST64_ABS_LO12_NC) that lld
-          # rejects. This affects collect2, gcov, and other tools pervasively.
-          # GCC 12.2.0 does not have this issue and builds cleanly with NDK lld.
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
-          cd gcc-12.2.0
-          contrib/download_prerequisites
-          cd ..
+          cd gcc-12.2.0 && contrib/download_prerequisites && cd ..
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
-          export CFLAGS="-Os -Wno-unused-command-line-argument"
-          export CXXFLAGS="-Os -Wno-unused-command-line-argument"
           ../gcc-12.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
-            --host=${{ env.TARGET_TRIPLE }} \
+            --host=aarch64-linux-gnu \
             --build=x86_64-linux-gnu \
             --enable-languages=c,c++ \
             --disable-nls \
@@ -105,14 +83,10 @@ jobs:
             --with-dwarf2 \
             --disable-install-libiberty \
             --disable-gcov \
+            --disable-lto \
+            --disable-plugin \
             --with-gnu-as \
             --with-gnu-ld \
-            CC="${{ env.CC }}" \
-            CXX="${{ env.CXX }}" \
-            AR="${{ env.AR }}" \
-            RANLIB="${{ env.RANLIB }}" \
-            NM="${{ env.NM }}" \
-            STRIP="${{ env.STRIP }}" \
             CFLAGS_FOR_TARGET="-Os"
           make -j$(nproc) all-gcc
           make install-gcc
@@ -133,17 +107,18 @@ jobs:
           make install
           echo "=== avr-libc done ==="
 
-      - name: Build avrdude 7.3 (cross to aarch64-android)
+      - name: Build avrdude 7.3 (host=aarch64, static)
         run: |
           wget -q "https://github.com/avrdudes/avrdude/releases/download/v7.3/avrdude-7.3.tar.gz"
           tar -xzf avrdude-7.3.tar.gz
           mkdir build-avrdude && cd build-avrdude
           cmake ../avrdude-7.3 \
             -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" \
-            -DCMAKE_C_COMPILER="${{ env.CC }}" \
-            -DCMAKE_CXX_COMPILER="${{ env.CXX }}" \
-            -DCMAKE_SYSTEM_NAME=Android \
-            -DCMAKE_ANDROID_API=${{ env.API_LEVEL }} \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_EXE_LINKER_FLAGS="-static" \
             -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
             -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
@@ -154,15 +129,16 @@ jobs:
             -DCMAKE_BUILD_TYPE=MinSizeRel
           make -j$(nproc)
           make install
+          # Copy avrdude.conf if present
+          find . -name "avrdude.conf" -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; || true
           echo "=== avrdude done ==="
 
       - name: Strip binaries
         run: |
-          export PATH="${{ env.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
             if file "$f" | grep -q "ELF.*aarch64"; then
-              echo "Stripping $f"
-              llvm-strip "$f" || true
+              aarch64-linux-gnu-strip "$f" 2>/dev/null || true
+              echo "Stripped: $f"
             fi
           done
 
@@ -172,26 +148,21 @@ jobs:
           BAD=0
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
             info=$(file "$f")
-            echo "$f: $info"
+            echo "$(basename $f): $info"
             if echo "$info" | grep -q "ELF" && ! echo "$info" | grep -q "aarch64"; then
               echo "❌ WRONG ARCH: $f"
               BAD=1
             fi
           done
-          if [ "$BAD" = "1" ]; then
-            echo "ERROR: Some binaries are not aarch64. Aborting."
-            exit 1
-          fi
+          [ "$BAD" = "0" ] || { echo "ERROR: Wrong arch binaries found"; exit 1; }
           echo "✅ All ELF binaries are aarch64"
 
       - name: Write manifest.json
         run: |
-          cat > "${{ env.INSTALL_DIR }}/manifest.json" <<EOF
+          cat > "${{ env.INSTALL_DIR }}/manifest.json" << EOF
           {
             "name": "avr-toolchain",
             "arch": "aarch64",
-            "abi": "aarch64-linux-android",
-            "api_level": ${{ env.API_LEVEL }},
             "version": "${{ github.event.inputs.release_version }}",
             "components": {
               "binutils": "2.42",
@@ -202,22 +173,17 @@ jobs:
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
-          cat "${{ env.INSTALL_DIR }}/manifest.json"
 
       - name: Package as zip
         run: |
-          VERSION="${{ github.event.inputs.release_version }}"
           ASSET_NAME="avr-toolchain-android-aarch64.zip"
           cd "${{ env.INSTALL_DIR }}"
           zip -r "${{ github.workspace }}/${ASSET_NAME}" .
           ls -lh "${{ github.workspace }}/${ASSET_NAME}"
           echo "ASSET_NAME=${ASSET_NAME}" >> $GITHUB_ENV
 
-      - name: Delete existing release if it exists
-        run: |
-          VERSION="${{ github.event.inputs.release_version }}"
-          gh release delete "$VERSION" --yes 2>/dev/null || true
-          git push origin --delete "refs/tags/$VERSION" 2>/dev/null || true
+      - name: Delete existing release if present
+        run: gh release delete "${{ github.event.inputs.release_version }}" --yes 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -229,16 +195,12 @@ jobs:
           body: |
             ## AVR Toolchain for Android AArch64
 
-            Built with Android NDK ${{ env.NDK_VERSION }}, API level ${{ env.API_LEVEL }}.
+            Statically linked — no runtime library dependencies. Runs on Android ARM64 directly.
 
             ### Components
-            - binutils 2.42 (avr-as, avr-ld, avr-ar, avr-objcopy, avr-objdump, avr-size)
+            - binutils 2.42
             - GCC 12.2.0 (avr-gcc, avr-g++)
             - avr-libc 2.1.0
             - avrdude 7.3
-
-            ### Architecture
-            - Target host: `aarch64-linux-android` (Android ARM64)
-            - Compiles for: AVR (ATmega328P, ATmega2560, etc.)
           files: ${{ env.ASSET_NAME }}
           token: ${{ secrets.GITHUB_TOKEN }}
