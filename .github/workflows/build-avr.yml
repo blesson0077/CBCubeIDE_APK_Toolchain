@@ -85,8 +85,13 @@ jobs:
           contrib/download_prerequisites
           cd ..
           mkdir build-gcc && cd build-gcc
-          # PATH must include our just-built avr-binutils so GCC configure finds avr-as etc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
+          # NDK's lld rejects misaligned relocations in gcov.o (known GCC 13 + lld bug).
+          # --disable-gcov removes that tool entirely — we don't need it for AVR work.
+          # LDFLAGS forces lld; suppress clang unused-arg warnings that become errors.
+          export LDFLAGS="-fuse-ld=lld"
+          export CFLAGS="-Os -Wno-unused-command-line-argument"
+          export CXXFLAGS="-Os -Wno-unused-command-line-argument"
           ../gcc-13.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
@@ -99,6 +104,7 @@ jobs:
             --enable-static \
             --with-dwarf2 \
             --disable-install-libiberty \
+            --disable-gcov \
             --with-gnu-as \
             --with-gnu-ld \
             CC="${{ env.CC }}" \
@@ -107,10 +113,7 @@ jobs:
             RANLIB="${{ env.RANLIB }}" \
             NM="${{ env.NM }}" \
             STRIP="${{ env.STRIP }}" \
-            CFLAGS="-Os" \
-            CXXFLAGS="-Os" \
-            CFLAGS_FOR_TARGET="-Os" \
-            CXXFLAGS_FOR_TARGET="-Os"
+            CFLAGS_FOR_TARGET="-Os"
           make -j$(nproc) all-gcc
           make install-gcc
           echo "=== gcc done ==="
