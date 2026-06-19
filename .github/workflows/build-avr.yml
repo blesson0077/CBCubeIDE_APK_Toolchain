@@ -134,10 +134,15 @@ jobs:
           wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
           tar -xjf avr-libc-2.1.0.tar.bz2
           mkdir build-avr-libc && cd build-avr-libc
-          export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
+          # avr-libc is compiled FOR the avr target, not for the host (aarch64).
+          # We must use the system's native x86_64 avr-gcc here — our custom
+          # aarch64 avr-gcc can't execute on the x86_64 runner.
+          # The resulting .a files are AVR machine code and are identical
+          # regardless of which host built them.
           ../avr-libc-2.1.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
-            --host=avr --build=x86_64-linux-gnu
+            --host=avr --build=x86_64-linux-gnu \
+            CC=/usr/bin/avr-gcc
           make -j$(nproc) && make install
           echo "=== avr-libc done ==="
 
