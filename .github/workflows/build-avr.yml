@@ -11,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       INSTALL_DIR: ${{ github.workspace }}/avr-toolchain-out
       DEPS_DIR:    ${{ github.workspace }}/aarch64-static-deps
