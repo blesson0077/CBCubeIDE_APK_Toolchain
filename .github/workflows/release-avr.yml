@@ -1,0 +1,115 @@
+name: Release AVR Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      run_id:
+        description: 'GitHub Actions Run ID to pull artifact from (from build-avr.yml run)'
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download avr-toolchain ZIP from Build Run
+        uses: actions/download-artifact@v4
+        with:
+          name: avr-toolchain-android-aarch64-zip
+          run-id: ${{ github.event.inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: release/
+
+      - name: Verify Downloaded Artifact
+        run: |
+          echo "=== Release directory ==="
+          ls -lh release/
+
+          echo ""
+          echo "=== ZIP contents ==="
+          unzip -l release/avr-toolchain-android-aarch64.zip | head -60
+
+          echo ""
+          echo "=== ZIP size ==="
+          du -sh release/avr-toolchain-android-aarch64.zip
+
+      - name: Generate Release Notes
+        run: |
+          cat > release-notes.md << EOF
+          # AVR Toolchain for Android ARM64 — ${{ github.event.inputs.version }}
+
+          Complete AVR cross-compilation toolchain built to run on **Android ARM64** devices inside **CBCubeIDE Android**.
+
+          ## Components
+
+          | Component   | Version |
+          |-------------|---------|
+          | Binutils    | 2.40    |
+          | GCC         | 12.2.0  |
+          | avr-libc    | 2.1.0   |
+          | Android NDK | r27c    |
+
+          ## Included Tools
+
+          - \`avr-gcc\`
+          - \`avr-as\`
+          - \`avr-ld\`
+          - \`avr-ar\`
+          - \`avr-ranlib\`
+          - \`avr-objcopy\`
+          - \`avr-objdump\`
+          - \`avr-size\`
+
+          ## Target Architecture
+
+          | | Triple |
+          |---|---|
+          | Runs on | \`aarch64-unknown-linux-android\` |
+          | Compiles for | \`avr\` |
+
+          ## Usage
+
+          Extract the ZIP inside CBCubeIDE Android toolchain directory.
+
+          \`\`\`
+          avr-toolchain-android-aarch64/
+          ├── bin/          ← avr-gcc, avr-ld, avr-as, etc.
+          ├── lib/          ← GCC runtime libraries
+          ├── avr/          ← avr-libc headers + libraries
+          ├── include/      ← GCC include files
+          └── manifest.json ← Toolchain metadata
+          \`\`\`
+          EOF
+
+          echo "=== Release notes ==="
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: "AVR Toolchain Android aarch64 ${{ github.event.inputs.version }}"
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          files: release/avr-toolchain-android-aarch64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Print Release URL
+        run: |
+          echo ""
+          echo "✅ Release published successfully"
+          echo "Repository: ${{ github.repository }}"
+          echo "Version: ${{ github.event.inputs.version }}"
+          echo "Check: https://github.com/${{ github.repository }}/releases/tag/${{ github.event.inputs.version }}"
