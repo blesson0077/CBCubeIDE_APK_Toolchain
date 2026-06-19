@@ -111,6 +111,7 @@ jobs:
             --with-dwarf2 \
             --disable-install-libiberty \
             --disable-gcov --disable-lto --disable-plugin \
+            --without-zstd \
             --with-gnu-as --with-gnu-ld \
             --with-gmp="${{ env.DEPS_DIR }}" \
             --with-mpfr="${{ env.DEPS_DIR }}" \
