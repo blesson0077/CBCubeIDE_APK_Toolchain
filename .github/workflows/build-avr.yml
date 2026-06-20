@@ -6,7 +6,7 @@ on:
       release_version:
         description: 'Release version (e.g. v1.0.12)'
         required: true
-        default: 'v1.0.12'
+        default: 'v1.0.13'
 
 jobs:
   build:
@@ -136,15 +136,20 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
           # Do NOT run download_prerequisites — we supply our own NDK-built deps
-          # Bionic patches: remove unlocked I/O redefinitions that clang C99 mode
-          # treats as implicit declarations. Standard fputc etc. work fine here.
-          sed -i '/fputc_unlocked/d'   gcc-12.2.0/fixincludes/system.h
-          sed -i '/fputs_unlocked/d'   gcc-12.2.0/fixincludes/system.h
-          sed -i '/fwrite_unlocked/d'  gcc-12.2.0/fixincludes/system.h
-          sed -i '/getc_unlocked/d'    gcc-12.2.0/fixincludes/system.h
-          sed -i '/getchar_unlocked/d' gcc-12.2.0/fixincludes/system.h
-          sed -i '/putc_unlocked/d'    gcc-12.2.0/fixincludes/system.h
-          sed -i '/putchar_unlocked/d' gcc-12.2.0/fixincludes/system.h
+          # Bionic patch: GCC has multiple system.h files (fixincludes/, libcpp/, gcc/)
+          # each redefining fputc/fputs/etc to *_unlocked variants.
+          # Bionic doesn't expose these in C99 strict mode — patch ALL of them at once.
+          find gcc-12.2.0 -name "system.h" | xargs sed -i \
+            -e '/fputc_unlocked/d'   \
+            -e '/fputs_unlocked/d'   \
+            -e '/fwrite_unlocked/d'  \
+            -e '/getc_unlocked/d'    \
+            -e '/getchar_unlocked/d' \
+            -e '/putc_unlocked/d'    \
+            -e '/putchar_unlocked/d'
+          echo "Patched system.h files:"
+          find gcc-12.2.0 -name "system.h" | xargs grep -l "unlocked" 2>/dev/null \
+            && echo "WARNING: some unlocked refs remain" || echo "All clean"
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
           ../gcc-12.2.0/configure \
