@@ -54,9 +54,11 @@ jobs:
           echo "NM=$TC/bin/llvm-nm"                                     >> $GITHUB_ENV
           echo "STRIP=$TC/bin/llvm-strip"                               >> $GITHUB_ENV
           echo "NDK_TC=$TC"                                             >> $GITHUB_ENV
-          # -fuse-ld=bfd  → clang finds ld.bfd we symlinked above
-          # -static-libstdc++ → statically embed libc++, no .so to bundle
-          echo "LDFLAGS=-fuse-ld=bfd -static-libstdc++"                >> $GITHUB_ENV
+          # -fuse-ld=bfd    → use GNU ld.bfd (symlinked above), avoids lld strict alignment
+          # -static          → use crtbegin_static.o (not crtbegin_dynamic.o)
+          #                    stdout stays in .bss (8-byte aligned), not .dynbss (unaligned)
+          #                    NDK/bionic static binaries use Android-allowed syscalls → no SIGSYS
+          echo "LDFLAGS=-fuse-ld=bfd -static"                          >> $GITHUB_ENV
           echo "CFLAGS=-Os"                                             >> $GITHUB_ENV
           echo "CXXFLAGS=-Os"                                           >> $GITHUB_ENV
 
@@ -186,7 +188,7 @@ jobs:
             -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
             -DCMAKE_ANDROID_NDK="${{ github.workspace }}/android-ndk-${{ env.NDK_VER }}" \
             -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=bfd -static-libstdc++" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=bfd -static" \
             -DUSE_LIBUSB_1_0=OFF -DUSE_LIBFTDI1=OFF \
             -DUSE_LIBHIDAPI=OFF -DUSE_LIBELF=OFF \
             -DUSE_LINUXGPIO=OFF -DUSE_LINUXSPI=OFF \
@@ -257,7 +259,7 @@ jobs:
           body: |
             ## AVR Toolchain for Android AArch64
 
-            Built with Android NDK r26d (API 24). Dynamic bionic linking — no seccomp violations.
+            Built with Android NDK r26d (API 24). Statically linked against bionic — no SIGSYS, no runtime dependencies.
 
             ### Components
             - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
