@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Release version (e.g. v1.0.10)'
+        description: 'Release version (e.g. v1.0.11)'
         required: true
-        default: 'v1.0.10'
+        default: 'v1.0.11'
 
 jobs:
   build:
@@ -71,6 +71,10 @@ jobs:
         run: |
           wget -q "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
           tar -xJf gmp-6.3.0.tar.xz
+          # Android bionic does not implement nl_langinfo().
+          # GMP uses it only to get the decimal point character.
+          # Hardcode "." (correct for C locale, which is what we always want).
+          sed -i 's|nl_langinfo (RADIXCHAR)|"."|g' gmp-6.3.0/gmp-impl.h
           mkdir build-gmp && cd build-gmp
           ../gmp-6.3.0/configure \
             --prefix="${{ env.DEPS_DIR }}" \
