@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Release version (e.g. v1.0.12)'
+        description: 'Release version (e.g. v1.0.15)'
         required: true
         default: 'v1.0.15'
 
@@ -40,6 +40,7 @@ jobs:
           NDK="${{ github.workspace }}/android-ndk-${NDK_VER}"
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 
+          # Symlink GNU ld.bfd into NDK bin — avoids lld strict alignment errors
           ln -sf /usr/bin/aarch64-linux-gnu-ld "$TC/bin/ld.bfd"
           echo "ld.bfd -> $(readlink -f $TC/bin/ld.bfd)"
 
@@ -50,6 +51,9 @@ jobs:
           echo "NM=$TC/bin/llvm-nm"                                     >> $GITHUB_ENV
           echo "STRIP=$TC/bin/llvm-strip"                               >> $GITHUB_ENV
           echo "NDK_TC=$TC"                                             >> $GITHUB_ENV
+          # -fuse-ld=bfd : use GNU ld.bfd (symlinked above), avoids lld strict alignment
+          # -static       : use bionic static CRT (crtbegin_static.o), avoids dynbss issue
+          #                 NDK/bionic static binaries use Android-allowed syscalls → no SIGSYS
           echo "LDFLAGS=-fuse-ld=bfd -static"                          >> $GITHUB_ENV
           echo "CFLAGS=-Os"                                             >> $GITHUB_ENV
           echo "CXXFLAGS=-Os"                                           >> $GITHUB_ENV
@@ -62,6 +66,7 @@ jobs:
         run: |
           wget -q "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
           tar -xJf gmp-6.3.0.tar.xz
+          # Android bionic has no nl_langinfo — hardcode C-locale decimal point
           sed -i 's|nl_langinfo (RADIXCHAR)|"."|g' gmp-6.3.0/gmp-impl.h
           mkdir build-gmp && cd build-gmp
           ../gmp-6.3.0/configure \
@@ -106,50 +111,31 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
 
-          # ── Source patch: force-undefine glob and posix_spawn in pex-unix.c and ldelf.c ──
+          # Patch: force-undefine posix_spawn and glob (not in bionic API < 28)
           cat > /tmp/patch_binutils.py << 'PYEOF'
           import pathlib, glob as g
-          
           def force_undefs(file_path):
               p = pathlib.Path(file_path)
-              if not p.exists():
-                  return
+              if not p.exists(): return
               content = p.read_text()
-              
-              undefs = "\n/* Forced undefs for Android Bionic API level < 28 compatibility */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
-              
-              if "Forced undefs for Android Bionic" in content:
-                  print(f"Already patched: {file_path}")
-                  return
-                  
+              undefs = "\n/* Forced undefs for Android Bionic API level < 28 */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
+              if "Forced undefs for Android Bionic" in content: return
               if '#include "config.h"' in content:
                   content = content.replace('#include "config.h"', '#include "config.h"' + undefs)
               elif '#include <config.h>' in content:
                   content = content.replace('#include <config.h>', '#include <config.h>' + undefs)
               else:
                   content = undefs + content
-                  
               p.write_text(content)
               print(f"Patched: {file_path}")
-          
-          for path in g.glob("binutils-2.42/**/pex-unix.c", recursive=True):
-              force_undefs(path)
-          for path in g.glob("binutils-2.42/**/ldelf.c", recursive=True):
-              force_undefs(path)
+          for path in g.glob("binutils-2.42/**/pex-unix.c", recursive=True): force_undefs(path)
+          for path in g.glob("binutils-2.42/**/ldelf.c",    recursive=True): force_undefs(path)
           PYEOF
           python3 /tmp/patch_binutils.py
 
-          echo "=== verify pex-unix.c clean ==="
-          grep -n "posix_spawn" binutils-2.42/libiberty/pex-unix.c \
-            && echo "WARNING: posix_spawn still present in pex-unix.c" \
-            || echo "OK"
-
           mkdir build-binutils && cd build-binutils
 
-          unset LDFLAGS
-          unset CFLAGS
-          unset CXXFLAGS
-
+          # Override CFLAGS/LDFLAGS locally for binutils
           cat > bionic.cache << 'CEOF'
           ac_cv_func_posix_spawn=no
           ac_cv_func_posix_spawnp=no
@@ -165,9 +151,6 @@ jobs:
           ac_cv_header_glob_h=no
           CEOF
 
-          export CFLAGS="-Os -Wno-implicit-function-declaration"
-          export LDFLAGS="-fuse-ld=bfd -static"
-
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
@@ -177,37 +160,28 @@ jobs:
             --disable-werror \
             --disable-shared \
             --enable-static \
-            --cache-file="${PWD}/bionic.cache"
+            --cache-file="${PWD}/bionic.cache" \
+            CFLAGS="-Os -Wno-implicit-function-declaration" \
+            LDFLAGS="-fuse-ld=bfd -static"
 
-          # ── Build: capture full log so GitHub truncation doesn't hide errors
           make -j$(nproc) 2>&1 | tee /tmp/binutils_build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" != "0" ]; then
-            echo "❌ binutils make FAILED (exit $BUILD_EXIT)"
-            echo "=== LAST 150 LINES (errors) ==="
-            tail -150 /tmp/binutils_build.log
-            echo "=== ALL undefined symbol errors ==="
-            grep -E "undefined symbol|error:" /tmp/binutils_build.log | head -60
-            exit 1
+            tail -100 /tmp/binutils_build.log; exit 1
           fi
-
-          make install || { echo "❌ binutils make install FAILED"; exit 1; }
-
-          ls -lh "${{ env.INSTALL_DIR }}/bin/"
+          make install
 
           for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
-            [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] \
-              && echo "✅ $b" \
-              || { echo "❌ MISSING: $b"; exit 1; }
+            [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] && echo "✅ $b" || { echo "❌ MISSING: $b"; exit 1; }
           done
-          echo "=== binutils all good ==="
+          echo "=== binutils done ==="
 
       - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
 
-          # Patch 1: remove *_unlocked stdio (not in bionic C99)
+          # Patch 1: remove *_unlocked stdio (not visible in bionic C99 strict mode)
           find gcc-12.2.0 -name "system.h" | xargs sed -i \
             -e '/fputc_unlocked/d'   \
             -e '/fputs_unlocked/d'   \
@@ -216,35 +190,27 @@ jobs:
             -e '/getchar_unlocked/d' \
             -e '/putc_unlocked/d'    \
             -e '/putchar_unlocked/d'
+          echo "Patched system.h files — no unlocked refs remaining:"
+          find gcc-12.2.0 -name "system.h" | xargs grep -l "unlocked" 2>/dev/null || echo "clean"
 
-          # Patch 2: force-undefine glob and posix_spawn in GCC bundled libiberty
+          # Patch 2: force-undefine posix_spawn/glob in GCC's bundled libiberty
           cat > /tmp/patch_gcc_iberty.py << 'PYEOF'
           import pathlib, glob as g
-          
           def force_undefs(file_path):
               p = pathlib.Path(file_path)
-              if not p.exists():
-                  return
+              if not p.exists(): return
               content = p.read_text()
-              
-              undefs = "\n/* Forced undefs for Android Bionic API level < 28 compatibility */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
-              
-              if "Forced undefs for Android Bionic" in content:
-                  print(f"Already patched: {file_path}")
-                  return
-                  
+              undefs = "\n/* Forced undefs for Android Bionic API level < 28 */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
+              if "Forced undefs for Android Bionic" in content: return
               if '#include "config.h"' in content:
                   content = content.replace('#include "config.h"', '#include "config.h"' + undefs)
               elif '#include <config.h>' in content:
                   content = content.replace('#include <config.h>', '#include <config.h>' + undefs)
               else:
                   content = undefs + content
-                  
               p.write_text(content)
               print(f"Patched: {file_path}")
-          
-          for path in g.glob("gcc-12.2.0/**/pex-unix.c", recursive=True):
-              force_undefs(path)
+          for path in g.glob("gcc-12.2.0/**/pex-unix.c", recursive=True): force_undefs(path)
           PYEOF
           python3 /tmp/patch_gcc_iberty.py
 
@@ -290,21 +256,17 @@ jobs:
             --cache-file="${PWD}/bionic.cache" \
             CFLAGS="-Os -Wno-implicit-function-declaration" \
             CXXFLAGS="-Os" \
-            LDFLAGS="-Wl,-z,max-page-size=65536 -Wl,-z,common-page-size=64" \
+            LDFLAGS="-fuse-ld=bfd -static" \
             CFLAGS_FOR_TARGET="-Os"
 
           make -j$(nproc) all-gcc 2>&1 | tee /tmp/gcc_build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" != "0" ]; then
-            echo "❌ GCC make FAILED"
-            echo "=== LAST 150 LINES ==="
             tail -150 /tmp/gcc_build.log
-            echo "=== ALL errors ==="
             grep -E "error:|undefined symbol" /tmp/gcc_build.log | head -60
             exit 1
           fi
-
-          make install-gcc || { echo "❌ GCC install FAILED"; exit 1; }
+          make install-gcc
           echo "=== GCC done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
@@ -313,6 +275,8 @@ jobs:
           wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
           tar -xjf avr-libc-2.1.0.tar.bz2
           mkdir build-avr-libc && cd build-avr-libc
+          # avr-libc compiles FOR avr — must use system x86_64 avr-gcc, not our aarch64 one.
+          # Explicitly override all tool vars so NDK env vars don't leak in.
           ../avr-libc-2.1.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --host=avr \
@@ -355,32 +319,71 @@ jobs:
             -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; 2>/dev/null || true
           echo "=== avrdude done ==="
 
-      - name: Create bare-name tools (ld, as, ar, etc.)
+      - name: Create bare-name tool copies (ld, as, ar, etc.)
         run: |
+          # GCC's collect2 searches -B directories for bare 'ld', 'as' etc. (not avr-prefixed).
+          # Copying (not symlinking) avoids any symlink resolution issues on Android.
           BIN="${{ env.INSTALL_DIR }}/bin"
-          TOOLS=(
-            "ld:avr-ld"
-            "as:avr-as"
-            "ar:avr-ar"
-            "ranlib:avr-ranlib"
-            "nm:avr-nm"
-            "objcopy:avr-objcopy"
-            "objdump:avr-objdump"
-            "size:avr-size"
-            "strip:avr-strip"
+          declare -A TOOLS=(
+            [ld]=avr-ld   [as]=avr-as     [ar]=avr-ar
+            [ranlib]=avr-ranlib [nm]=avr-nm [objcopy]=avr-objcopy
+            [objdump]=avr-objdump [size]=avr-size [strip]=avr-strip
           )
-          for item in "${TOOLS[@]}"; do
-            bare="${item%%:*}"
-            prefixed="${item#*:}"
+          for bare in "${!TOOLS[@]}"; do
+            prefixed="${TOOLS[$bare]}"
             if [ -f "$BIN/$prefixed" ]; then
               cp "$BIN/$prefixed" "$BIN/$bare"
-              echo "✅ Created $bare from $prefixed"
+              echo "✅ $bare ← $prefixed"
             else
-              echo "❌ MISSING: $prefixed"
-              exit 1
+              echo "❌ MISSING: $BIN/$prefixed"; exit 1
             fi
           done
-          ls -lh "$BIN"
+          echo "=== bare-name tools created ==="
+
+      # ── Fix PT_TLS p_align: ld.bfd sets it to 8, Android Bionic requires >= 64 ──
+      - name: Fix TLS segment alignment for Android Bionic
+        run: |
+          python3 << 'PYEOF'
+          import struct, os, glob
+
+          def fix_tls_alignment(path):
+              try:
+                  with open(path, 'rb') as f:
+                      data = bytearray(f.read())
+              except Exception:
+                  return
+              # Must be ELF64 little-endian
+              if data[:4] != b'\x7fELF' or data[4] != 2 or data[5] != 1:
+                  return
+              # ELF64 header fields
+              e_phoff     = struct.unpack_from('<Q', data, 32)[0]
+              e_phentsize = struct.unpack_from('<H', data, 54)[0]
+              e_phnum     = struct.unpack_from('<H', data, 56)[0]
+              PT_TLS = 7
+              changed = False
+              for i in range(e_phnum):
+                  off = e_phoff + i * e_phentsize
+                  p_type = struct.unpack_from('<I', data, off)[0]
+                  if p_type == PT_TLS:
+                      # p_align is at byte offset 48 within ELF64 Phdr
+                      align_off = off + 48
+                      p_align = struct.unpack_from('<Q', data, align_off)[0]
+                      if p_align < 64:
+                          print(f"  {os.path.basename(path)}: PT_TLS p_align {p_align} → 64")
+                          struct.pack_into('<Q', data, align_off, 64)
+                          changed = True
+              if changed:
+                  with open(path, 'wb') as f:
+                      f.write(bytes(data))
+
+          install_dir = os.environ['INSTALL_DIR']
+          for root, dirs, files in os.walk(install_dir):
+              for fname in files:
+                  fpath = os.path.join(root, fname)
+                  if not os.path.islink(fpath):
+                      fix_tls_alignment(fpath)
+          print("TLS alignment fix complete")
+          PYEOF
 
       - name: Strip and verify binaries
         run: |
@@ -389,7 +392,7 @@ jobs:
               "${{ env.STRIP }}" "$f" 2>/dev/null && echo "stripped: $(basename $f)" || true
             fi
           done
-          echo "=== verify ==="
+          echo "=== verify arch ==="
           BAD=0
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
             info=$(file "$f")
@@ -410,20 +413,18 @@ jobs:
             cc1 collect2
           )
           MISSING=0
-          echo "=== Binary completeness check ==="
           for bin in "${REQUIRED[@]}"; do
             found=$(find "${{ env.INSTALL_DIR }}/bin" \
                          "${{ env.INSTALL_DIR }}/libexec" \
                     -name "$bin" 2>/dev/null | head -1)
             if [ -n "$found" ]; then
-              echo "  ✅ $bin  →  $found"
+              echo "  ✅ $bin → $found"
             else
-              echo "  ❌ MISSING: $bin"
-              MISSING=1
+              echo "  ❌ MISSING: $bin"; MISSING=1
             fi
           done
-          [ "$MISSING" = "1" ] && { echo "Missing binaries."; exit 1; }
-          echo "✅ All required binaries present."
+          [ "$MISSING" = "1" ] && { echo "Missing required binaries"; exit 1; }
+          echo "✅ All required binaries present"
 
       - name: Write manifest.json
         run: |
@@ -465,18 +466,18 @@ jobs:
           body: |
             ## AVR Toolchain for Android AArch64
 
-            Built with Android NDK r26d (API 24). Statically linked against bionic.
+            Built with Android NDK r26d (API 24).
+            Statically linked against bionic — no SIGSYS, no TLS underalignment.
 
             ### Components
             - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
 
             ### Archive includes
-            - `bin/avr-gcc`, `bin/avr-g++`, `bin/avr-as`, `bin/avr-ld`
-            - `bin/avr-ar`, `bin/avr-objcopy`, `bin/avr-objdump`, `bin/avr-nm`
-            - `bin/avr-ranlib`, `bin/avr-size`, `bin/avrdude`
-            - `bin/ld` (copy of avr-ld — required by GCC driver)
-            - `libexec/gcc/avr/.../cc1`, `collect2`
+            - `bin/avr-gcc`, `bin/avr-as`, `bin/avr-ld`, `bin/avr-ar`, `bin/avr-objcopy`
+            - `bin/ld`, `bin/as`, `bin/ar` etc. (bare-name copies for GCC internal use)
+            - `libexec/gcc/avr/12.2.0/cc1`, `collect2`
             - `avr/lib/`, `avr/include/` (avr-libc)
+            - `etc/avrdude.conf`
 
             ### Architecture
             - Host ABI: aarch64-linux-android (bionic, API 24+)
