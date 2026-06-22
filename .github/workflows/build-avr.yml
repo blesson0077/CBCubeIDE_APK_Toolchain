@@ -124,30 +124,30 @@ jobs:
           # The undef means pex-unix.c will use the fork/exec path instead,
           # which works fine on Android.
           python3 - << 'PYEOF'
-import pathlib
+          import pathlib
+          
+          p = pathlib.Path("binutils-2.42/libiberty/pex-unix.c")
+          src = p.read_text()
+          
+          header = """\
+          /* Android bionic patch: include spawn.h for prototypes, then disable
+             the posix_spawn code path (fork/exec path works fine on Android). */
+          #include <spawn.h>
+          #ifdef HAVE_POSIX_SPAWN
+          #undef HAVE_POSIX_SPAWN
+          #endif
+          """
 
-p = pathlib.Path("binutils-2.42/libiberty/pex-unix.c")
-src = p.read_text()
-
-header = """\
-/* Android bionic patch: include spawn.h for prototypes, then disable
-   the posix_spawn code path (fork/exec path works fine on Android). */
-#include <spawn.h>
-#ifdef HAVE_POSIX_SPAWN
-#undef HAVE_POSIX_SPAWN
-#endif
-"""
-
-if "Android bionic patch" not in src:
-    src = header + src
-    p.write_text(src)
-    print("PATCH APPLIED successfully")
-else:
-    print("Patch already present, skipping")
-
-print("=== First 10 lines of pex-unix.c ===")
-print('\n'.join(src.splitlines()[:10]))
-PYEOF
+          if "Android bionic patch" not in src:
+              src = header + src
+              p.write_text(src)
+              print("PATCH APPLIED successfully")
+          else:
+              print("Patch already present, skipping")
+          
+              print("=== First 10 lines of pex-unix.c ===")
+              print('\n'.join(src.splitlines()[:10]))
+              PYEOF
 
           # Confirm the patch landed
           echo "=== pex-unix.c first 8 lines ==="
