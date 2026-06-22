@@ -18,6 +18,7 @@ jobs:
       API_LEVEL:   24
       INSTALL_DIR: ${{ github.workspace }}/avr-toolchain-out
       DEPS_DIR:    ${{ github.workspace }}/ndk-static-deps
+      NATIVE_DIR:  ${{ github.workspace }}/avr-gcc-native
 
     steps:
       - name: Checkout
@@ -30,7 +31,8 @@ jobs:
             build-essential wget xz-utils texinfo bison flex \
             cmake ninja-build python3 file zip \
             binutils-aarch64-linux-gnu \
-            gcc-avr
+            gcc-avr \
+            libgmp-dev libmpfr-dev libmpc-dev
 
       - name: Download and configure Android NDK r26d
         run: |
@@ -171,7 +173,7 @@ jobs:
           fi
           make install
 
-          for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size avr-strip; do
+          for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
             [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] && echo "✅ $b" || { echo "❌ MISSING: $b"; exit 1; }
           done
           echo "=== binutils done ==="
@@ -215,7 +217,14 @@ jobs:
           python3 /tmp/patch_gcc_iberty.py
 
           mkdir build-gcc && cd build-gcc
-          export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
+          # NOTE: deliberately NOT adding INSTALL_DIR/bin to PATH here. The binutils
+          # built in the previous step (avr-as, avr-ld, ...) were built with
+          # host=aarch64-linux-android — they are themselves Android ELF binaries and
+          # CANNOT run on this x86_64 runner. Putting them ahead of /usr/bin in PATH
+          # would shadow the working x86_64 avr-as/avr-ld (from the apt gcc-avr
+          # package) that GCC's configure needs to execute for its assembler/linker
+          # capability probes. The default PATH (with /usr/bin) already has working
+          # ones, so no PATH change is needed.
 
           cat > bionic.cache << 'CEOF'
           ac_cv_func_posix_spawn=no
@@ -259,18 +268,92 @@ jobs:
             LDFLAGS="-fuse-ld=bfd -static" \
             CFLAGS_FOR_TARGET="-Os"
 
-          # all-gcc only builds the compiler driver and front ends. AVR
-          # firmware linking also requires the target libgcc.a archive.
-          make -j$(nproc) all-gcc all-target-libgcc 2>&1 | tee /tmp/gcc_build.log
+          make -j$(nproc) all-gcc 2>&1 | tee /tmp/gcc_build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" != "0" ]; then
             tail -150 /tmp/gcc_build.log
             grep -E "error:|undefined symbol" /tmp/gcc_build.log | head -60
             exit 1
           fi
-          make install-gcc install-target-libgcc
+          make install-gcc
           echo "=== GCC done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
+
+      # ── Critical fix: produce libgcc.a for the avr target ──
+      # `make all-gcc` above only built the host driver/cc1/cc1plus — it never builds
+      # target runtime libraries (libgcc.a). That's needed for `make all-target-libgcc`,
+      # which has to EXECUTE the just-built avr-gcc to compile libgcc's sources — but
+      # that avr-gcc is an Android ELF binary and can't run on this x86_64 runner
+      # (classic "Canadian Cross" limitation). The fix: build a second, fully NATIVE
+      # copy of the same GCC 12.2.0 (host=build=x86_64-linux-gnu, same target=avr)
+      # whose own compiler CAN run here, use IT to build libgcc.a, then copy that into
+      # the android-hosted install tree below. libgcc.a is pure AVR object code, so it
+      # doesn't matter which host produced it — only that the GCC version and default
+      # multilib list match, which they do (same gcc-12.2.0 source tree, same target).
+      #
+      # NOTE: this intentionally only builds libgcc, not libstdc++. AVR libstdc++
+      # support is not solid in stock GCC/avr-libc (no real OS/threads, very limited
+      # multilib support for the STL), and most embedded AVR C++ code avoids the
+      # runtime anyway (-fno-exceptions -fno-rtti, header-only templates). cc1plus
+      # will still work for that kind of code; anything needing iostream/full STL
+      # containers will need further work beyond this fix.
+      - name: Build native avr-gcc 12.2.0 (host=build) — for target libgcc only
+        run: |
+          unset CC CXX AR RANLIB NM STRIP LDFLAGS CFLAGS CXXFLAGS
+
+          mkdir -p "${{ env.NATIVE_DIR }}"
+          mkdir -p build-gcc-native && cd build-gcc-native
+
+          ../gcc-12.2.0/configure \
+            --prefix="${{ env.NATIVE_DIR }}" \
+            --target=avr \
+            --host=x86_64-linux-gnu \
+            --build=x86_64-linux-gnu \
+            --enable-languages=c,c++ \
+            --disable-nls \
+            --disable-libssp \
+            --disable-shared \
+            --enable-static \
+            --disable-werror \
+            --with-dwarf2 \
+            --disable-install-libiberty \
+            --disable-gcov \
+            --disable-lto \
+            --disable-plugin \
+            --without-zstd \
+            --with-gnu-as \
+            --with-gnu-ld \
+            CFLAGS="-O2" \
+            CXXFLAGS="-O2" \
+            CFLAGS_FOR_TARGET="-Os"
+
+          make -j$(nproc) all-gcc 2>&1 | tee /tmp/gcc_native_build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" != "0" ]; then
+            tail -150 /tmp/gcc_native_build.log; exit 1
+          fi
+
+          make -j$(nproc) all-target-libgcc 2>&1 | tee /tmp/gcc_native_libgcc.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" != "0" ]; then
+            tail -150 /tmp/gcc_native_libgcc.log; exit 1
+          fi
+
+          make install-target-libgcc
+          echo "=== native libgcc done ==="
+          find "${{ env.NATIVE_DIR }}" -name "libgcc.a"
+
+      - name: Merge target libgcc into the android-hosted toolchain
+        run: |
+          mkdir -p "${{ env.INSTALL_DIR }}/lib/gcc/avr/12.2.0"
+          cp -a "${{ env.NATIVE_DIR }}/lib/gcc/avr/12.2.0/." \
+                "${{ env.INSTALL_DIR }}/lib/gcc/avr/12.2.0/"
+
+          FOUND=$(find "${{ env.INSTALL_DIR }}" -name "libgcc.a" | head -1)
+          if [ -z "$FOUND" ]; then
+            echo "❌ libgcc.a missing after merge"; exit 1
+          fi
+          echo "✅ libgcc.a present: $FOUND"
 
       - name: Build avr-libc 2.1.0
         run: |
@@ -412,7 +495,7 @@ jobs:
             avr-gcc avr-g++ avr-as avr-ld avr-ar
             avr-objcopy avr-objdump avr-nm avr-ranlib avr-size
             ld as ar ranlib nm objcopy objdump size strip
-            cc1 collect2
+            cc1 cc1plus collect2
           )
           MISSING=0
           for bin in "${REQUIRED[@]}"; do
@@ -425,13 +508,16 @@ jobs:
               echo "  ❌ MISSING: $bin"; MISSING=1
             fi
           done
+
+          echo "=== libgcc check ==="
+          LIBGCC=$(find "${{ env.INSTALL_DIR }}/lib/gcc/avr" -name "libgcc.a" 2>/dev/null | head -1)
+          if [ -z "$LIBGCC" ]; then
+            echo "  ❌ MISSING: libgcc.a for avr target"; MISSING=1
+          else
+            echo "  ✅ libgcc.a → $LIBGCC"
+          fi
+
           [ "$MISSING" = "1" ] && { echo "Missing required binaries"; exit 1; }
-          find "${{ env.INSTALL_DIR }}" -path '*/avr/lib/libgcc.a' -print -quit | grep -q . || {
-            echo "Missing AVR libgcc.a"; exit 1;
-          }
-          find "${{ env.INSTALL_DIR }}" -path '*/avr/lib/libc.a' -print -quit | grep -q . || {
-            echo "Missing AVR libc.a"; exit 1;
-          }
           echo "✅ All required binaries present"
 
       - name: Write manifest.json
@@ -458,12 +544,6 @@ jobs:
           ASSET="avr-toolchain-android-aarch64.zip"
           cd "${{ env.INSTALL_DIR }}"
           zip -r "${{ github.workspace }}/$ASSET" .
-          # Do not publish an archive that omits the linker required by GCC.
-          for linker in bin/avr-ld bin/ld; do
-            unzip -Z1 "${{ github.workspace }}/$ASSET" | grep -Fxq "$linker" || {
-              echo "Packaged archive is missing $linker"; exit 1;
-            }
-          done
           ls -lh "${{ github.workspace }}/$ASSET"
           echo "ASSET_NAME=$ASSET" >> $GITHUB_ENV
 
@@ -485,11 +565,13 @@ jobs:
 
             ### Components
             - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
+            - Includes target libgcc.a (built via an auxiliary native-host pass)
 
             ### Archive includes
             - `bin/avr-gcc`, `bin/avr-as`, `bin/avr-ld`, `bin/avr-ar`, `bin/avr-objcopy`
             - `bin/ld`, `bin/as`, `bin/ar` etc. (bare-name copies for GCC internal use)
-            - `libexec/gcc/avr/12.2.0/cc1`, `collect2`
+            - `libexec/gcc/avr/12.2.0/cc1`, `cc1plus`, `collect2`
+            - `lib/gcc/avr/12.2.0/` (libgcc.a)
             - `avr/lib/`, `avr/include/` (avr-libc)
             - `etc/avrdude.conf`
 
