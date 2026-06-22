@@ -222,6 +222,21 @@ jobs:
             -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; 2>/dev/null || true
           echo "=== avrdude done ==="
 
+      # ── ADD bin/ld so GCC's driver can find the linker ────────────────────
+      # GCC's driver exec()s bare "ld", not "avr-ld", when it's in the same
+      # bin/ directory as itself.  Without this copy the link stage dies with:
+      #   avr-gcc: fatal error: cannot execute 'ld': execvp: No such file or directory
+      - name: Create bin/ld from avr-ld
+        run: |
+          BIN="${{ env.INSTALL_DIR }}/bin"
+          if [ ! -f "$BIN/avr-ld" ]; then
+            echo "❌ avr-ld missing from $BIN — binutils step must have failed"
+            exit 1
+          fi
+          cp "$BIN/avr-ld" "$BIN/ld"
+          echo "✅ bin/ld created (copy of avr-ld)"
+          ls -lh "$BIN/avr-ld" "$BIN/ld"
+
       # ── Verify + strip + package ──────────────────────────────────────────
       - name: Strip and verify binaries
         run: |
@@ -241,6 +256,50 @@ jobs:
           done
           [ "$BAD" = "0" ] || { echo "Wrong arch found"; exit 1; }
           echo "✅ All aarch64"
+
+      # ── Mandatory pre-package binary check ───────────────────────────────
+      # Fails the build NOW (before zipping) if any required binary is absent.
+      # Prevents shipping another broken archive silently.
+      - name: Verify all required binaries are present
+        run: |
+          BIN="${{ env.INSTALL_DIR }}/bin"
+          REQUIRED=(
+            avr-gcc
+            avr-g++
+            avr-as
+            avr-ld
+            avr-ar
+            avr-objcopy
+            avr-objdump
+            avr-nm
+            avr-ranlib
+            avr-size
+            ld
+            cc1
+            collect2
+          )
+          MISSING=0
+          echo "=== Binary completeness check ==="
+          for bin in "${REQUIRED[@]}"; do
+            # Search bin/ and libexec/ (cc1 and collect2 live under libexec/gcc/avr/)
+            found=$(find "${{ env.INSTALL_DIR }}/bin" \
+                         "${{ env.INSTALL_DIR }}/libexec" \
+                    -name "$bin" 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+              echo "  ✅ $bin  →  $found"
+            else
+              echo "  ❌ MISSING: $bin"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo ""
+            echo "One or more required binaries are missing."
+            echo "Fix the build step that produces them before re-running."
+            exit 1
+          fi
+          echo ""
+          echo "✅ All required binaries present — safe to package."
 
       - name: Write manifest.json
         run: |
@@ -286,6 +345,14 @@ jobs:
 
             ### Components
             - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
+
+            ### Archive includes
+            - `bin/avr-gcc`, `bin/avr-g++`, `bin/avr-as`, `bin/avr-ld`
+            - `bin/avr-ar`, `bin/avr-objcopy`, `bin/avr-objdump`, `bin/avr-nm`
+            - `bin/avr-ranlib`, `bin/avr-size`, `bin/avrdude`
+            - `bin/ld` (copy of avr-ld — required by GCC driver)
+            - `libexec/gcc/avr/.../cc1`, `collect2`
+            - `avr/lib/`, `avr/include/` (avr-libc)
 
             ### Architecture
             - Host ABI: aarch64-linux-android (bionic, API 24+)
