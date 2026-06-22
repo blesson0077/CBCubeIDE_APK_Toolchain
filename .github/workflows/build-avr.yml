@@ -126,9 +126,21 @@ jobs:
             --build=x86_64-linux-gnu \
             --disable-nls --disable-werror \
             --disable-shared --enable-static
-          make -j$(nproc) && make install
-          echo "=== binutils done ==="
-          ls "${{ env.INSTALL_DIR }}/bin/"
+          make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
+          make install    || { echo "❌ binutils make install FAILED"; exit 1; }
+      
+          echo "=== binutils install contents ==="
+          ls -lh "${{ env.INSTALL_DIR }}/bin/"
+      
+          # Hard-stop now if the critical binaries didn't land
+          for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
+            if [ ! -f "${{ env.INSTALL_DIR }}/bin/$b" ]; then
+              echo "❌ MISSING after install: $b"
+              exit 1
+            fi
+            echo "✅ $b"
+          done
+          echo "=== binutils all good ==="
 
       # ── GCC ───────────────────────────────────────────────────────────────
       - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
