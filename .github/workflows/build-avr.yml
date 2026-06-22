@@ -171,7 +171,7 @@ jobs:
           fi
           make install
 
-          for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
+          for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size avr-strip; do
             [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] && echo "✅ $b" || { echo "❌ MISSING: $b"; exit 1; }
           done
           echo "=== binutils done ==="
@@ -259,14 +259,16 @@ jobs:
             LDFLAGS="-fuse-ld=bfd -static" \
             CFLAGS_FOR_TARGET="-Os"
 
-          make -j$(nproc) all-gcc 2>&1 | tee /tmp/gcc_build.log
+          # all-gcc only builds the compiler driver and front ends. AVR
+          # firmware linking also requires the target libgcc.a archive.
+          make -j$(nproc) all-gcc all-target-libgcc 2>&1 | tee /tmp/gcc_build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" != "0" ]; then
             tail -150 /tmp/gcc_build.log
             grep -E "error:|undefined symbol" /tmp/gcc_build.log | head -60
             exit 1
           fi
-          make install-gcc
+          make install-gcc install-target-libgcc
           echo "=== GCC done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
@@ -424,6 +426,12 @@ jobs:
             fi
           done
           [ "$MISSING" = "1" ] && { echo "Missing required binaries"; exit 1; }
+          find "${{ env.INSTALL_DIR }}" -path '*/avr/lib/libgcc.a' -print -quit | grep -q . || {
+            echo "Missing AVR libgcc.a"; exit 1;
+          }
+          find "${{ env.INSTALL_DIR }}" -path '*/avr/lib/libc.a' -print -quit | grep -q . || {
+            echo "Missing AVR libc.a"; exit 1;
+          }
           echo "✅ All required binaries present"
 
       - name: Write manifest.json
@@ -450,6 +458,12 @@ jobs:
           ASSET="avr-toolchain-android-aarch64.zip"
           cd "${{ env.INSTALL_DIR }}"
           zip -r "${{ github.workspace }}/$ASSET" .
+          # Do not publish an archive that omits the linker required by GCC.
+          for linker in bin/avr-ld bin/ld; do
+            unzip -Z1 "${{ github.workspace }}/$ASSET" | grep -Fxq "$linker" || {
+              echo "Packaged archive is missing $linker"; exit 1;
+            }
+          done
           ls -lh "${{ github.workspace }}/$ASSET"
           echo "ASSET_NAME=$ASSET" >> $GITHUB_ENV
 
