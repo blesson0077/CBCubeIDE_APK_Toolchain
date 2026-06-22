@@ -106,14 +106,12 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
 
-          # ── Patch pex-unix.c: remove posix_spawn block entirely ──────────
-          # We also pass ac_cv_func_posix_spawn=no to configure below so
-          # config.h never defines HAVE_POSIX_SPAWN. Double protection.
-          cat > /tmp/patch_binutils.py << 'PYEOF'
+          # ── Source patch: remove posix_spawn block from pex-unix.c ────────
+          # Belt-and-suspenders alongside the cache file approach below.
+          cat > /tmp/patch_pex.py << 'PYEOF'
           import pathlib, glob as g
           
           def remove_posix_spawn_block(src):
-              """Remove the entire #ifdef HAVE_POSIX_SPAWN ... #endif block line by line."""
               lines = src.splitlines(keepends=True)
               out = []
               depth = 0
@@ -123,7 +121,7 @@ jobs:
                   if not in_block and s == '#ifdef HAVE_POSIX_SPAWN':
                       in_block = True
                       depth = 1
-                      out.append('/* posix_spawn block removed: not in bionic API 24 */\n')
+                      out.append('/* posix_spawn removed: not in bionic API 24 */\n')
                       continue
                   if in_block:
                       if s.startswith('#if'):
@@ -142,19 +140,17 @@ jobs:
               if 'HAVE_POSIX_SPAWN' in src:
                   patched = remove_posix_spawn_block(src)
                   p.write_text(patched)
-                  still_has = 'HAVE_POSIX_SPAWN' in patched
-                  print(f"PATCHED {path} — HAVE_POSIX_SPAWN still present: {still_has}")
+                  remaining = 'HAVE_POSIX_SPAWN' in patched
+                  print(f"PATCHED {path} | HAVE_POSIX_SPAWN still present: {remaining}")
               else:
-                  print(f"No posix_spawn in {path}")
-          
-          print("Patch complete.")
+                  print(f"Already clean: {path}")
           PYEOF
-          python3 /tmp/patch_binutils.py
+          python3 /tmp/patch_pex.py
 
-          # Verify patch
-          echo "=== pex-unix.c around spawn ==="
-          grep -n "posix_spawn\|HAVE_POSIX_SPAWN" \
-            binutils-2.42/libiberty/pex-unix.c || echo "Clean - no posix_spawn found"
+          echo "=== verify pex-unix.c clean ==="
+          grep -n "posix_spawn" binutils-2.42/libiberty/pex-unix.c \
+            && echo "WARNING: posix_spawn still present" \
+            || echo "OK: posix_spawn fully removed"
 
           mkdir build-binutils && cd build-binutils
 
@@ -162,16 +158,32 @@ jobs:
           unset CFLAGS
           unset CXXFLAGS
 
-          # KEY: ac_cv_func_* variables tell autoconf "this function does not exist"
-          # so config.h never defines HAVE_POSIX_SPAWN or HAVE_GLOB.
-          # This is cleaner and more reliable than source patching alone.
-          #
-          # posix_spawn* — not in bionic libc until API 28 (we target API 24)
-          # glob/globfree — not in bionic at all (ldelf.c uses it for ld.so.conf parsing)
-          #                 AVR ld never needs host shared-lib search paths anyway.
-          #
-          # LDFLAGS: -fuse-ld=bfd forces GNU ld (symlinked above), not lld.
-          # lld is stricter about undefined symbols and rejects this build.
+          # ── CRITICAL: bionic.cache shared across ALL sub-configures ───────
+          # Without --cache-file, the ld/ bfd/ sub-configures run their OWN
+          # configure scripts independently and detect glob/posix_spawn as
+          # available (because the BUILD machine is x86_64 Linux which has them).
+          # --cache-file=bionic.cache makes every sub-configure read+write the
+          # same file, so our "function not available" overrides propagate to
+          # the ld/ subdir that builds avr-ld (where glob and posix_spawn
+          # are actually linked).
+          cat > bionic.cache << 'CEOF'
+          ac_cv_func_posix_spawn=no
+          ac_cv_func_posix_spawnp=no
+          ac_cv_func_posix_spawnattr_init=no
+          ac_cv_func_posix_spawnattr_setflags=no
+          ac_cv_func_posix_spawnattr_destroy=no
+          ac_cv_func_posix_spawn_file_actions_init=no
+          ac_cv_func_posix_spawn_file_actions_destroy=no
+          ac_cv_func_posix_spawn_file_actions_adddup2=no
+          ac_cv_func_posix_spawn_file_actions_addclose=no
+          ac_cv_func_glob=no
+          ac_cv_func_globfree=no
+          ac_cv_header_glob_h=no
+          CEOF
+
+          echo "=== bionic.cache ==="
+          cat bionic.cache
+
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
@@ -181,18 +193,23 @@ jobs:
             --disable-werror \
             --disable-shared \
             --enable-static \
-            ac_cv_func_posix_spawn=no \
-            ac_cv_func_posix_spawnp=no \
-            ac_cv_func_posix_spawnattr_init=no \
-            ac_cv_func_posix_spawnattr_setflags=no \
-            ac_cv_func_posix_spawn_file_actions_init=no \
-            ac_cv_func_glob=no \
-            ac_cv_func_globfree=no \
+            --cache-file=bionic.cache \
             CFLAGS="-Os -Wno-implicit-function-declaration" \
             LDFLAGS="-fuse-ld=bfd -static"
 
-          make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
-          make install    || { echo "❌ binutils make install FAILED"; exit 1; }
+          # ── Build: capture full log so GitHub truncation doesn't hide errors
+          make -j$(nproc) 2>&1 | tee /tmp/binutils_build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" != "0" ]; then
+            echo "❌ binutils make FAILED (exit $BUILD_EXIT)"
+            echo "=== LAST 150 LINES (errors) ==="
+            tail -150 /tmp/binutils_build.log
+            echo "=== ALL undefined symbol errors ==="
+            grep -E "undefined symbol|error:" /tmp/binutils_build.log | head -60
+            exit 1
+          fi
+
+          make install || { echo "❌ binutils make install FAILED"; exit 1; }
 
           ls -lh "${{ env.INSTALL_DIR }}/bin/"
 
@@ -208,7 +225,7 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
 
-          # Patch 1: remove *_unlocked stdio from system.h (not in bionic C99)
+          # Patch 1: remove *_unlocked stdio (not in bionic C99)
           find gcc-12.2.0 -name "system.h" | xargs sed -i \
             -e '/fputc_unlocked/d'   \
             -e '/fputs_unlocked/d'   \
@@ -219,7 +236,7 @@ jobs:
             -e '/putchar_unlocked/d'
 
           # Patch 2: remove posix_spawn block from GCC's bundled libiberty
-          cat > /tmp/patch_gcc.py << 'PYEOF'
+          cat > /tmp/patch_gcc_pex.py << 'PYEOF'
           import pathlib, glob as g
           
           def remove_posix_spawn_block(src):
@@ -232,7 +249,7 @@ jobs:
                   if not in_block and s == '#ifdef HAVE_POSIX_SPAWN':
                       in_block = True
                       depth = 1
-                      out.append('/* posix_spawn block removed: not in bionic API 24 */\n')
+                      out.append('/* posix_spawn removed: not in bionic API 24 */\n')
                       continue
                   if in_block:
                       if s.startswith('#if'):
@@ -253,14 +270,27 @@ jobs:
                   p.write_text(patched)
                   print(f"PATCHED: {path}")
               else:
-                  print(f"No posix_spawn in {path}")
-          
-          print("GCC patch complete.")
+                  print(f"Already clean: {path}")
           PYEOF
-          python3 /tmp/patch_gcc.py
+          python3 /tmp/patch_gcc_pex.py
 
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
+
+          cat > bionic.cache << 'CEOF'
+          ac_cv_func_posix_spawn=no
+          ac_cv_func_posix_spawnp=no
+          ac_cv_func_posix_spawnattr_init=no
+          ac_cv_func_posix_spawnattr_setflags=no
+          ac_cv_func_posix_spawnattr_destroy=no
+          ac_cv_func_posix_spawn_file_actions_init=no
+          ac_cv_func_posix_spawn_file_actions_destroy=no
+          ac_cv_func_posix_spawn_file_actions_adddup2=no
+          ac_cv_func_posix_spawn_file_actions_addclose=no
+          ac_cv_func_glob=no
+          ac_cv_func_globfree=no
+          ac_cv_header_glob_h=no
+          CEOF
 
           ../gcc-12.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
@@ -283,16 +313,23 @@ jobs:
             --with-gmp="${{ env.DEPS_DIR }}" \
             --with-mpfr="${{ env.DEPS_DIR }}" \
             --with-mpc="${{ env.DEPS_DIR }}" \
-            ac_cv_func_posix_spawn=no \
-            ac_cv_func_posix_spawnp=no \
-            ac_cv_func_glob=no \
+            --cache-file=bionic.cache \
             CFLAGS="-Os -Wno-implicit-function-declaration" \
             CXXFLAGS="-Os" \
             CFLAGS_FOR_TARGET="-Os"
 
-          make -j$(nproc) all-gcc  || { echo "❌ GCC make FAILED"; exit 1; }
-          make install-gcc          || { echo "❌ GCC install FAILED"; exit 1; }
+          make -j$(nproc) all-gcc 2>&1 | tee /tmp/gcc_build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" != "0" ]; then
+            echo "❌ GCC make FAILED"
+            echo "=== LAST 150 LINES ==="
+            tail -150 /tmp/gcc_build.log
+            echo "=== ALL errors ==="
+            grep -E "error:|undefined symbol" /tmp/gcc_build.log | head -60
+            exit 1
+          fi
 
+          make install-gcc || { echo "❌ GCC install FAILED"; exit 1; }
           echo "=== GCC done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
@@ -347,11 +384,11 @@ jobs:
         run: |
           BIN="${{ env.INSTALL_DIR }}/bin"
           if [ ! -f "$BIN/avr-ld" ]; then
-            echo "❌ avr-ld missing from $BIN — binutils step must have failed"
+            echo "❌ avr-ld missing from $BIN"
             exit 1
           fi
           cp "$BIN/avr-ld" "$BIN/ld"
-          echo "✅ bin/ld created (copy of avr-ld)"
+          echo "✅ bin/ld created"
           ls -lh "$BIN/avr-ld" "$BIN/ld"
 
       - name: Strip and verify binaries
@@ -393,8 +430,8 @@ jobs:
               MISSING=1
             fi
           done
-          [ "$MISSING" = "1" ] && { echo "Missing binaries — fix build."; exit 1; }
-          echo "✅ All required binaries present — safe to package."
+          [ "$MISSING" = "1" ] && { echo "Missing binaries."; exit 1; }
+          echo "✅ All required binaries present."
 
       - name: Write manifest.json
         run: |
