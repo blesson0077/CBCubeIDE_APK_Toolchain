@@ -106,143 +106,109 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
 
+          # ── Patch pex-unix.c: remove posix_spawn block entirely ──────────
+          # We also pass ac_cv_func_posix_spawn=no to configure below so
+          # config.h never defines HAVE_POSIX_SPAWN. Double protection.
           cat > /tmp/patch_binutils.py << 'PYEOF'
-          import pathlib, re, glob as globmod
+          import pathlib, glob as g
           
-          # ── Fix 1: pex-unix.c ────────────────────────────────────────────────────
-          # bionic NDK r26d API 24 does NOT provide posix_spawn* in libc.
-          # The functions exist only from API 28+. We must completely remove
-          # the #ifdef HAVE_POSIX_SPAWN ... #endif block so the fork/exec
-          # fallback path is compiled and linked instead.
-          for pex_path in globmod.glob("binutils-2.42/**/pex-unix.c", recursive=True):
-              p = pathlib.Path(pex_path)
-              src = p.read_text()
-          
-              if "HAVE_POSIX_SPAWN" not in src:
-                  print(f"No HAVE_POSIX_SPAWN in {pex_path}, skipping")
-                  continue
-
-          # Replace the entire #ifdef HAVE_POSIX_SPAWN block with a comment.
-          # The block starts with #ifdef HAVE_POSIX_SPAWN and ends with the
-          # matching #endif /* HAVE_POSIX_SPAWN */
-          # We use a regex that matches across newlines.
-          patched = re.sub(
-              r'#ifdef HAVE_POSIX_SPAWN.*?#endif\s*/\*\s*HAVE_POSIX_SPAWN\s*\*/',
-              '/* posix_spawn disabled: not available in bionic API 24 */',
-              src,
-              flags=re.DOTALL
-          )
-      
-          if patched == src:
-              print(f"WARNING: regex did not match in {pex_path} — trying line-based removal")
+          def remove_posix_spawn_block(src):
+              """Remove the entire #ifdef HAVE_POSIX_SPAWN ... #endif block line by line."""
               lines = src.splitlines(keepends=True)
               out = []
               depth = 0
               in_block = False
               for line in lines:
-                  stripped = line.strip()
-                  if stripped == '#ifdef HAVE_POSIX_SPAWN':
+                  s = line.strip()
+                  if not in_block and s == '#ifdef HAVE_POSIX_SPAWN':
                       in_block = True
                       depth = 1
-                      out.append('/* posix_spawn disabled: not available in bionic API 24 */\n')
+                      out.append('/* posix_spawn block removed: not in bionic API 24 */\n')
                       continue
                   if in_block:
-                      if stripped.startswith('#ifdef') or stripped.startswith('#if '):
+                      if s.startswith('#if'):
                           depth += 1
-                      elif stripped.startswith('#endif'):
+                      elif s.startswith('#endif'):
                           depth -= 1
                           if depth == 0:
                               in_block = False
                       continue
                   out.append(line)
-              patched = ''.join(out)
-      
-          p.write_text(patched)
-          print(f"PATCHED pex-unix.c: {pex_path}")
-          print("First 5 lines: " + '\n'.join(patched.splitlines()[:5]))
-
-          # ── Fix 2: configure — disable HAVE_POSIX_SPAWN detection ───────────────
-          # Even if we remove it from pex-unix.c, config.h may define it.
-          # Force configure to skip posix_spawn detection by patching libiberty/configure.
-          for cfg_path in globmod.glob("binutils-2.42/**/libiberty/configure", recursive=True):
-              p = pathlib.Path(cfg_path)
-              src = p.read_text()
-              if 'posix_spawn' in src:
-                  src = src.replace('posix_spawn', 'posix_spawn_DISABLED')
-                  p.write_text(src)
-                  print(f"PATCHED configure: {cfg_path}")
+              return ''.join(out)
           
-          # ── Fix 3: ldelf.c — glob/globfree not in bionic API 24 ─────────────────
-          # ldelf.c uses glob() to parse ld.so.conf. bionic doesn't have glob()
-          # until API 28. We stub out the glob call so it always returns no results
-          # (safe: AVR ld doesn't need host shared lib search paths).
-          for ldelf_path in globmod.glob("binutils-2.42/**/ldelf.c", recursive=True):
-              p = pathlib.Path(ldelf_path)
+          for path in g.glob("binutils-2.42/**/pex-unix.c", recursive=True):
+              p = pathlib.Path(path)
               src = p.read_text()
-              if 'glob' not in src:
-                  continue
-              # Add a glob stub at the very top of the file
-              stub = '''
-          /* Android bionic stub: glob() not available in API 24 */
-          #ifndef HAVE_GLOB
-          #include <string.h>
-          typedef struct { int gl_pathc; char **gl_pathv; } glob_t;
-          static inline int glob(const char *p, int f, void *e, glob_t *g)
-            { (void)p;(void)f;(void)e; g->gl_pathc=0; g->gl_pathv=0; return 1; }
-          static inline void globfree(glob_t *g) { (void)g; }
-          #endif
-          '''
-          if 'Android bionic stub' not in src:
-              # insert after first #include line
-              first_inc = src.find('#include')
-              if first_inc != -1:
-                  end_of_line = src.find('\n', first_inc)
-                  src = src[:end_of_line+1] + stub + src[end_of_line+1:]
+              if 'HAVE_POSIX_SPAWN' in src:
+                  patched = remove_posix_spawn_block(src)
+                  p.write_text(patched)
+                  still_has = 'HAVE_POSIX_SPAWN' in patched
+                  print(f"PATCHED {path} — HAVE_POSIX_SPAWN still present: {still_has}")
               else:
-                  src = stub + src
-              p.write_text(src)
-              print(f"PATCHED ldelf.c: {ldelf_path}")
-      
-          print("All patches done.")
+                  print(f"No posix_spawn in {path}")
+          
+          print("Patch complete.")
           PYEOF
-      
-                python3 /tmp/patch_binutils.py
-      
-                mkdir build-binutils && cd build-binutils
-      
-                unset LDFLAGS
-                unset CFLAGS
-                unset CXXFLAGS
-      
-                ../binutils-2.42/configure \
-                  --prefix="${{ env.INSTALL_DIR }}" \
-                  --target=avr \
-                  --host=aarch64-linux-android \
-                  --build=x86_64-linux-gnu \
-                  --disable-nls \
-                  --disable-werror \
-                  --disable-shared \
-                  --enable-static \
-                  CFLAGS="-Os -Wno-implicit-function-declaration" \
-                  LDFLAGS="-static -fuse-ld=bfd"
-      
-                make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
-                make install    || { echo "❌ binutils make install FAILED"; exit 1; }
-      
-                ls -lh "${{ env.INSTALL_DIR }}/bin/"
-      
-                for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
-                  [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] \
-                    && echo "✅ $b" \
-                    || { echo "❌ MISSING: $b"; exit 1; }
-                done
-                echo "=== binutils all good ==="
+          python3 /tmp/patch_binutils.py
+
+          # Verify patch
+          echo "=== pex-unix.c around spawn ==="
+          grep -n "posix_spawn\|HAVE_POSIX_SPAWN" \
+            binutils-2.42/libiberty/pex-unix.c || echo "Clean - no posix_spawn found"
+
+          mkdir build-binutils && cd build-binutils
+
+          unset LDFLAGS
+          unset CFLAGS
+          unset CXXFLAGS
+
+          # KEY: ac_cv_func_* variables tell autoconf "this function does not exist"
+          # so config.h never defines HAVE_POSIX_SPAWN or HAVE_GLOB.
+          # This is cleaner and more reliable than source patching alone.
+          #
+          # posix_spawn* — not in bionic libc until API 28 (we target API 24)
+          # glob/globfree — not in bionic at all (ldelf.c uses it for ld.so.conf parsing)
+          #                 AVR ld never needs host shared-lib search paths anyway.
+          #
+          # LDFLAGS: -fuse-ld=bfd forces GNU ld (symlinked above), not lld.
+          # lld is stricter about undefined symbols and rejects this build.
+          ../binutils-2.42/configure \
+            --prefix="${{ env.INSTALL_DIR }}" \
+            --target=avr \
+            --host=aarch64-linux-android \
+            --build=x86_64-linux-gnu \
+            --disable-nls \
+            --disable-werror \
+            --disable-shared \
+            --enable-static \
+            ac_cv_func_posix_spawn=no \
+            ac_cv_func_posix_spawnp=no \
+            ac_cv_func_posix_spawnattr_init=no \
+            ac_cv_func_posix_spawnattr_setflags=no \
+            ac_cv_func_posix_spawn_file_actions_init=no \
+            ac_cv_func_glob=no \
+            ac_cv_func_globfree=no \
+            CFLAGS="-Os -Wno-implicit-function-declaration" \
+            LDFLAGS="-fuse-ld=bfd -static"
+
+          make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
+          make install    || { echo "❌ binutils make install FAILED"; exit 1; }
+
+          ls -lh "${{ env.INSTALL_DIR }}/bin/"
+
+          for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
+            [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] \
+              && echo "✅ $b" \
+              || { echo "❌ MISSING: $b"; exit 1; }
+          done
+          echo "=== binutils all good ==="
 
       - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
 
+          # Patch 1: remove *_unlocked stdio from system.h (not in bionic C99)
           find gcc-12.2.0 -name "system.h" | xargs sed -i \
             -e '/fputc_unlocked/d'   \
             -e '/fputs_unlocked/d'   \
@@ -252,58 +218,45 @@ jobs:
             -e '/putc_unlocked/d'    \
             -e '/putchar_unlocked/d'
 
+          # Patch 2: remove posix_spawn block from GCC's bundled libiberty
           cat > /tmp/patch_gcc.py << 'PYEOF'
-          import pathlib, re, glob as globmod
+          import pathlib, glob as g
           
-          # Same pex-unix.c fix for GCC's bundled libiberty
-          for pex_path in globmod.glob("gcc-12.2.0/**/pex-unix.c", recursive=True):
-              p = pathlib.Path(pex_path)
+          def remove_posix_spawn_block(src):
+              lines = src.splitlines(keepends=True)
+              out = []
+              depth = 0
+              in_block = False
+              for line in lines:
+                  s = line.strip()
+                  if not in_block and s == '#ifdef HAVE_POSIX_SPAWN':
+                      in_block = True
+                      depth = 1
+                      out.append('/* posix_spawn block removed: not in bionic API 24 */\n')
+                      continue
+                  if in_block:
+                      if s.startswith('#if'):
+                          depth += 1
+                      elif s.startswith('#endif'):
+                          depth -= 1
+                          if depth == 0:
+                              in_block = False
+                      continue
+                  out.append(line)
+              return ''.join(out)
+          
+          for path in g.glob("gcc-12.2.0/**/pex-unix.c", recursive=True):
+              p = pathlib.Path(path)
               src = p.read_text()
-              if "HAVE_POSIX_SPAWN" not in src:
-                  continue
-              patched = re.sub(
-                  r'#ifdef HAVE_POSIX_SPAWN.*?#endif\s*/\*\s*HAVE_POSIX_SPAWN\s*\*/',
-                  '/* posix_spawn disabled: not available in bionic API 24 */',
-                  src,
-                  flags=re.DOTALL
-              )
-              if patched == src:
-                  lines = src.splitlines(keepends=True)
-                  out = []
-                  depth = 0
-                  in_block = False
-                  for line in lines:
-                      stripped = line.strip()
-                      if stripped == '#ifdef HAVE_POSIX_SPAWN':
-                          in_block = True
-                          depth = 1
-                          out.append('/* posix_spawn disabled */\n')
-                          continue
-                      if in_block:
-                          if stripped.startswith('#ifdef') or stripped.startswith('#if '):
-                              depth += 1
-                          elif stripped.startswith('#endif'):
-                              depth -= 1
-                              if depth == 0:
-                                  in_block = False
-                          continue
-                      out.append(line)
-                  patched = ''.join(out)
-              p.write_text(patched)
-              print(f"PATCHED: {pex_path}")
+              if 'HAVE_POSIX_SPAWN' in src:
+                  patched = remove_posix_spawn_block(src)
+                  p.write_text(patched)
+                  print(f"PATCHED: {path}")
+              else:
+                  print(f"No posix_spawn in {path}")
           
-          # Patch libiberty/configure to disable posix_spawn detection
-          for cfg_path in globmod.glob("gcc-12.2.0/**/libiberty/configure", recursive=True):
-              p = pathlib.Path(cfg_path)
-              src = p.read_text()
-              if 'posix_spawn' in src:
-                  src = src.replace('posix_spawn', 'posix_spawn_DISABLED')
-                  p.write_text(src)
-                  print(f"PATCHED configure: {cfg_path}")
-          
-          print("GCC patches done.")
+          print("GCC patch complete.")
           PYEOF
-
           python3 /tmp/patch_gcc.py
 
           mkdir build-gcc && cd build-gcc
@@ -330,6 +283,9 @@ jobs:
             --with-gmp="${{ env.DEPS_DIR }}" \
             --with-mpfr="${{ env.DEPS_DIR }}" \
             --with-mpc="${{ env.DEPS_DIR }}" \
+            ac_cv_func_posix_spawn=no \
+            ac_cv_func_posix_spawnp=no \
+            ac_cv_func_glob=no \
             CFLAGS="-Os -Wno-implicit-function-declaration" \
             CXXFLAGS="-Os" \
             CFLAGS_FOR_TARGET="-Os"
@@ -420,19 +376,9 @@ jobs:
       - name: Verify all required binaries are present
         run: |
           REQUIRED=(
-            avr-gcc
-            avr-g++
-            avr-as
-            avr-ld
-            avr-ar
-            avr-objcopy
-            avr-objdump
-            avr-nm
-            avr-ranlib
-            avr-size
-            ld
-            cc1
-            collect2
+            avr-gcc avr-g++ avr-as avr-ld avr-ar
+            avr-objcopy avr-objdump avr-nm avr-ranlib avr-size
+            ld cc1 collect2
           )
           MISSING=0
           echo "=== Binary completeness check ==="
@@ -447,10 +393,7 @@ jobs:
               MISSING=1
             fi
           done
-          if [ "$MISSING" = "1" ]; then
-            echo "One or more required binaries are missing."
-            exit 1
-          fi
+          [ "$MISSING" = "1" ] && { echo "Missing binaries — fix build."; exit 1; }
           echo "✅ All required binaries present — safe to package."
 
       - name: Write manifest.json
