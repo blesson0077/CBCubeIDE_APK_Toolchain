@@ -122,27 +122,21 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
       
-          # ── Bionic patch: force-disable posix_spawn in pex-unix.c ──────────────
-          # configure detects posix_spawn as available (bionic has the symbols at
-          # link time) and writes HAVE_POSIX_SPAWN into config.h. But bionic NDK
-          # r26d does NOT declare the prototypes in its headers under -pedantic,
-          # so the compiler errors with 15x "undeclared function" errors.
-          #
-          # The only reliable fix: inject #undef HAVE_POSIX_SPAWN directly into
-          # pex-unix.c AFTER the #include "config.h" line, overriding config.h.
-          # This forces libiberty to use the fork()+exec() path instead.
-          sed -i 's|#ifdef HAVE_CONFIG_H|#ifdef HAVE_CONFIG_H\n/* Android bionic: posix_spawn symbols exist but headers do not declare\n   prototypes under -pedantic. Force fork+exec path. */\n#undef HAVE_POSIX_SPAWN|' \
-              binutils-2.42/libiberty/pex-unix.c
+          # ── Bionic patch: add spawn.h include to pex-unix.c ───────────────────
+          # Bionic has posix_spawn* symbols but they are declared in <spawn.h>,
+          # NOT pulled in by the standard headers that pex-unix.c already includes.
+          # Under -pedantic clang treats the missing declarations as hard errors.
+          # Fix: prepend #include <spawn.h> at the very top of pex-unix.c.
+          PEX="${{ github.workspace }}/binutils-2.42/libiberty/pex-unix.c"
+          printf '#include <spawn.h>\n' | cat - "$PEX" > /tmp/pex-patched.c
+          cp /tmp/pex-patched.c "$PEX"
       
-          # Verify the patch landed
-          echo "=== pex-unix.c patch check ==="
-          grep -n "HAVE_POSIX_SPAWN" binutils-2.42/libiberty/pex-unix.c | head -10
-          echo "✅ patch applied"
+          # Verify
+          echo "=== pex-unix.c first 5 lines after patch ==="
+          head -5 "$PEX"
       
           mkdir build-binutils && cd build-binutils
       
-          # Clear NDK global flags — binutils links its own host tools and
-          # rejects -fuse-ld=bfd. Pass only what we need explicitly.
           unset LDFLAGS
           unset CFLAGS
           unset CXXFLAGS
