@@ -54,10 +54,6 @@ jobs:
           echo "NM=$TC/bin/llvm-nm"                                     >> $GITHUB_ENV
           echo "STRIP=$TC/bin/llvm-strip"                               >> $GITHUB_ENV
           echo "NDK_TC=$TC"                                             >> $GITHUB_ENV
-          # -fuse-ld=bfd    → use GNU ld.bfd (symlinked above), avoids lld strict alignment
-          # -static          → use crtbegin_static.o (not crtbegin_dynamic.o)
-          #                    stdout stays in .bss (8-byte aligned), not .dynbss (unaligned)
-          #                    NDK/bionic static binaries use Android-allowed syscalls → no SIGSYS
           echo "LDFLAGS=-fuse-ld=bfd -static"                          >> $GITHUB_ENV
           echo "CFLAGS=-Os"                                             >> $GITHUB_ENV
           echo "CXXFLAGS=-Os"                                           >> $GITHUB_ENV
@@ -114,49 +110,73 @@ jobs:
           make -j$(nproc) && make install
 
       # ── binutils ──────────────────────────────────────────────────────────
-      # IMPORTANT: unset global LDFLAGS/CFLAGS before configuring binutils.
-      # The global LDFLAGS=-fuse-ld=bfd -static set by the NDK step causes
-      # binutils' own host-tool link to fail. We pass clean flags explicitly.
       - name: Build binutils 2.42 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
-      
-          # ── Bionic patch: add spawn.h include to pex-unix.c ───────────────────
-          # Bionic has posix_spawn* symbols but they are declared in <spawn.h>,
-          # NOT pulled in by the standard headers that pex-unix.c already includes.
-          # Under -pedantic clang treats the missing declarations as hard errors.
-          # Fix: prepend #include <spawn.h> at the very top of pex-unix.c.
-          PEX="${{ github.workspace }}/binutils-2.42/libiberty/pex-unix.c"
-          printf '#include <spawn.h>\n' | cat - "$PEX" > /tmp/pex-patched.c
-          cp /tmp/pex-patched.c "$PEX"
-      
-          # Verify
-          echo "=== pex-unix.c first 5 lines after patch ==="
-          head -5 "$PEX"
-      
+
+          # ── Bionic patch: pex-unix.c uses posix_spawn* without including <spawn.h>
+          # libiberty's own Makefile adds -pedantic which makes clang treat
+          # undeclared function calls as hard errors — cannot be overridden by
+          # configure CFLAGS. Only source-level fix is reliable.
+          # Strategy: prepend #include <spawn.h> so prototypes are declared,
+          # AND undef HAVE_POSIX_SPAWN so the broken code path is compiled out.
+          # The undef means pex-unix.c will use the fork/exec path instead,
+          # which works fine on Android.
+          python3 - << 'PYEOF'
+import pathlib
+
+p = pathlib.Path("binutils-2.42/libiberty/pex-unix.c")
+src = p.read_text()
+
+header = """\
+/* Android bionic patch: include spawn.h for prototypes, then disable
+   the posix_spawn code path (fork/exec path works fine on Android). */
+#include <spawn.h>
+#ifdef HAVE_POSIX_SPAWN
+#undef HAVE_POSIX_SPAWN
+#endif
+"""
+
+if "Android bionic patch" not in src:
+    src = header + src
+    p.write_text(src)
+    print("PATCH APPLIED successfully")
+else:
+    print("Patch already present, skipping")
+
+print("=== First 10 lines of pex-unix.c ===")
+print('\n'.join(src.splitlines()[:10]))
+PYEOF
+
+          # Confirm the patch landed
+          echo "=== pex-unix.c first 8 lines ==="
+          head -8 "binutils-2.42/libiberty/pex-unix.c"
+
           mkdir build-binutils && cd build-binutils
-      
+
           unset LDFLAGS
           unset CFLAGS
           unset CXXFLAGS
-      
+
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
             --host=aarch64-linux-android \
             --build=x86_64-linux-gnu \
-            --disable-nls --disable-werror \
-            --disable-shared --enable-static \
-            CFLAGS="-Os" \
+            --disable-nls \
+            --disable-werror \
+            --disable-shared \
+            --enable-static \
+            CFLAGS="-Os -Wno-implicit-function-declaration" \
             LDFLAGS="-static"
-      
+
           make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
           make install    || { echo "❌ binutils make install FAILED"; exit 1; }
-      
+
           echo "=== binutils install contents ==="
           ls -lh "${{ env.INSTALL_DIR }}/bin/"
-      
+
           for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
             if [ ! -f "${{ env.INSTALL_DIR }}/bin/$b" ]; then
               echo "❌ MISSING after install: $b"
@@ -165,15 +185,17 @@ jobs:
             echo "✅ $b"
           done
           echo "=== binutils all good ==="
+
       # ── GCC ───────────────────────────────────────────────────────────────
       - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
-          # Do NOT run download_prerequisites — we supply our own NDK-built deps
-          # Bionic patch: GCC has multiple system.h files (fixincludes/, libcpp/, gcc/)
-          # each redefining fputc/fputs/etc to *_unlocked variants.
-          # Bionic doesn't expose these in C99 strict mode — patch ALL of them at once.
+
+          # Do NOT run download_prerequisites — we supply our own NDK-built deps.
+
+          # Bionic patch 1: GCC system.h redefines stdio functions to *_unlocked
+          # variants that bionic does not expose in C99 strict mode. Delete them.
           find gcc-12.2.0 -name "system.h" | xargs sed -i \
             -e '/fputc_unlocked/d'   \
             -e '/fputs_unlocked/d'   \
@@ -182,31 +204,68 @@ jobs:
             -e '/getchar_unlocked/d' \
             -e '/putc_unlocked/d'    \
             -e '/putchar_unlocked/d'
+
           echo "Patched system.h files:"
           find gcc-12.2.0 -name "system.h" | xargs grep -l "unlocked" 2>/dev/null \
             && echo "WARNING: some unlocked refs remain" || echo "All clean"
+
+          # Bionic patch 2: GCC's libiberty also has pex-unix.c with the same
+          # posix_spawn* issue. Patch it the same way.
+          python3 - << 'PYEOF'
+import pathlib, glob
+
+header = """\
+/* Android bionic patch: include spawn.h for prototypes, then disable
+   the posix_spawn code path (fork/exec path works fine on Android). */
+#include <spawn.h>
+#ifdef HAVE_POSIX_SPAWN
+#undef HAVE_POSIX_SPAWN
+#endif
+"""
+
+for path_str in glob.glob("gcc-12.2.0/**/pex-unix.c", recursive=True):
+    p = pathlib.Path(path_str)
+    src = p.read_text()
+    if "Android bionic patch" not in src:
+        src = header + src
+        p.write_text(src)
+        print(f"PATCHED: {path_str}")
+    else:
+        print(f"Already patched: {path_str}")
+PYEOF
+
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
+
           ../gcc-12.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
             --host=aarch64-linux-android \
             --build=x86_64-linux-gnu \
             --enable-languages=c,c++ \
-            --disable-nls --disable-libssp \
-            --disable-shared --enable-static \
+            --disable-nls \
+            --disable-libssp \
+            --disable-shared \
+            --enable-static \
             --with-dwarf2 \
             --disable-install-libiberty \
-            --disable-gcov --disable-lto --disable-plugin \
+            --disable-gcov \
+            --disable-lto \
+            --disable-plugin \
             --without-zstd \
-            --with-gnu-as --with-gnu-ld \
+            --with-gnu-as \
+            --with-gnu-ld \
             --with-gmp="${{ env.DEPS_DIR }}" \
             --with-mpfr="${{ env.DEPS_DIR }}" \
             --with-mpc="${{ env.DEPS_DIR }}" \
+            CFLAGS="-Os -Wno-implicit-function-declaration" \
+            CXXFLAGS="-Os" \
             CFLAGS_FOR_TARGET="-Os"
+
           make -j$(nproc) all-gcc  || { echo "❌ GCC make FAILED"; exit 1; }
           make install-gcc          || { echo "❌ GCC install FAILED"; exit 1; }
-          echo "=== gcc done ==="
+
+          echo "=== GCC done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
       # ── avr-libc ──────────────────────────────────────────────────────────
@@ -215,16 +274,19 @@ jobs:
           wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
           tar -xjf avr-libc-2.1.0.tar.bz2
           mkdir build-avr-libc && cd build-avr-libc
+
           # avr-libc compiles FOR the avr target using the system x86_64 avr-gcc.
           # Explicitly override CC/AR/RANLIB/STRIP so the NDK env vars (llvm-ar etc.)
           # don't leak in — avr-libc configure rejects non-GNU ar with "Wrong archiver".
           ../avr-libc-2.1.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
-            --host=avr --build=x86_64-linux-gnu \
+            --host=avr \
+            --build=x86_64-linux-gnu \
             CC=/usr/bin/avr-gcc \
             AR=/usr/bin/avr-ar \
             RANLIB=/usr/bin/avr-ranlib \
             STRIP=/usr/bin/avr-strip
+
           make -j$(nproc) && make install
           echo "=== avr-libc done ==="
 
@@ -237,6 +299,7 @@ jobs:
           AVRDUDE_SRC=$(ls -d avrdude-*/ | head -1)
           echo "Source: $AVRDUDE_SRC"
           mkdir build-avrdude && cd build-avrdude
+
           cmake "../$AVRDUDE_SRC" \
             -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" \
             -DCMAKE_C_COMPILER="${{ env.CC }}" \
@@ -247,19 +310,25 @@ jobs:
             -DCMAKE_ANDROID_NDK="${{ github.workspace }}/android-ndk-${{ env.NDK_VER }}" \
             -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=bfd -static" \
-            -DUSE_LIBUSB_1_0=OFF -DUSE_LIBFTDI1=OFF \
-            -DUSE_LIBHIDAPI=OFF -DUSE_LIBELF=OFF \
-            -DUSE_LINUXGPIO=OFF -DUSE_LINUXSPI=OFF \
+            -DUSE_LIBUSB_1_0=OFF \
+            -DUSE_LIBFTDI1=OFF \
+            -DUSE_LIBHIDAPI=OFF \
+            -DUSE_LIBELF=OFF \
+            -DUSE_LINUXGPIO=OFF \
+            -DUSE_LINUXSPI=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=MinSizeRel
+
           make -j$(nproc) && make install
+
           find . -name "avrdude.conf" \
             -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; 2>/dev/null || true
+
           echo "=== avrdude done ==="
 
       # ── ADD bin/ld so GCC's driver can find the linker ────────────────────
       # GCC's driver exec()s bare "ld", not "avr-ld", when it's in the same
-      # bin/ directory as itself.  Without this copy the link stage dies with:
+      # bin/ directory as itself. Without this copy the link stage dies with:
       #   avr-gcc: fatal error: cannot execute 'ld': execvp: No such file or directory
       - name: Create bin/ld from avr-ld
         run: |
@@ -280,6 +349,7 @@ jobs:
               "${{ env.STRIP }}" "$f" 2>/dev/null && echo "stripped: $(basename $f)" || true
             fi
           done
+
           echo "=== verify ==="
           BAD=0
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
@@ -293,8 +363,6 @@ jobs:
           echo "✅ All aarch64"
 
       # ── Mandatory pre-package binary check ───────────────────────────────
-      # Fails the build NOW (before zipping) if any required binary is absent.
-      # Prevents shipping another broken archive silently.
       - name: Verify all required binaries are present
         run: |
           REQUIRED=(
@@ -315,7 +383,6 @@ jobs:
           MISSING=0
           echo "=== Binary completeness check ==="
           for bin in "${REQUIRED[@]}"; do
-            # Search bin/ and libexec/ (cc1 and collect2 live under libexec/gcc/avr/)
             found=$(find "${{ env.INSTALL_DIR }}/bin" \
                          "${{ env.INSTALL_DIR }}/libexec" \
                     -name "$bin" 2>/dev/null | head -1)
