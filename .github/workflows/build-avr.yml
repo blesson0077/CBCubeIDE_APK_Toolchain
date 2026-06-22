@@ -114,25 +114,38 @@ jobs:
           make -j$(nproc) && make install
 
       # ── binutils ──────────────────────────────────────────────────────────
+      # IMPORTANT: unset global LDFLAGS/CFLAGS before configuring binutils.
+      # The global LDFLAGS=-fuse-ld=bfd -static set by the NDK step causes
+      # binutils' own host-tool link to fail. We pass clean flags explicitly.
       - name: Build binutils 2.42 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
           mkdir build-binutils && cd build-binutils
+
+          # Clear NDK global flags — binutils links its own host tools and
+          # rejects -fuse-ld=bfd. Pass only what we need explicitly.
+          unset LDFLAGS
+          unset CFLAGS
+          unset CXXFLAGS
+
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
             --host=aarch64-linux-android \
             --build=x86_64-linux-gnu \
             --disable-nls --disable-werror \
-            --disable-shared --enable-static
+            --disable-shared --enable-static \
+            CFLAGS="-Os" \
+            LDFLAGS="-static"
+
           make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
           make install    || { echo "❌ binutils make install FAILED"; exit 1; }
-      
+
           echo "=== binutils install contents ==="
           ls -lh "${{ env.INSTALL_DIR }}/bin/"
-      
-          # Hard-stop now if the critical binaries didn't land
+
+          # Hard-stop if any critical binary is missing
           for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
             if [ ! -f "${{ env.INSTALL_DIR }}/bin/$b" ]; then
               echo "❌ MISSING after install: $b"
@@ -181,8 +194,8 @@ jobs:
             --with-mpfr="${{ env.DEPS_DIR }}" \
             --with-mpc="${{ env.DEPS_DIR }}" \
             CFLAGS_FOR_TARGET="-Os"
-          make -j$(nproc) all-gcc
-          make install-gcc
+          make -j$(nproc) all-gcc  || { echo "❌ GCC make FAILED"; exit 1; }
+          make install-gcc          || { echo "❌ GCC install FAILED"; exit 1; }
           echo "=== gcc done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
@@ -274,7 +287,6 @@ jobs:
       # Prevents shipping another broken archive silently.
       - name: Verify all required binaries are present
         run: |
-          BIN="${{ env.INSTALL_DIR }}/bin"
           REQUIRED=(
             avr-gcc
             avr-g++
