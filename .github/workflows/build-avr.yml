@@ -316,6 +316,7 @@ jobs:
             --cache-file=bionic.cache \
             CFLAGS="-Os -Wno-implicit-function-declaration" \
             CXXFLAGS="-Os" \
+            LDFLAGS="-Wl,-z,max-page-size=65536 -Wl,-z,common-page-size=64" \
             CFLAGS_FOR_TARGET="-Os"
 
           make -j$(nproc) all-gcc 2>&1 | tee /tmp/gcc_build.log
@@ -380,16 +381,32 @@ jobs:
             -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; 2>/dev/null || true
           echo "=== avrdude done ==="
 
-      - name: Create bin/ld from avr-ld
+      - name: Create bare-name tools (ld, as, ar, etc.)
         run: |
           BIN="${{ env.INSTALL_DIR }}/bin"
-          if [ ! -f "$BIN/avr-ld" ]; then
-            echo "❌ avr-ld missing from $BIN"
-            exit 1
-          fi
-          cp "$BIN/avr-ld" "$BIN/ld"
-          echo "✅ bin/ld created"
-          ls -lh "$BIN/avr-ld" "$BIN/ld"
+          TOOLS=(
+            "ld:avr-ld"
+            "as:avr-as"
+            "ar:avr-ar"
+            "ranlib:avr-ranlib"
+            "nm:avr-nm"
+            "objcopy:avr-objcopy"
+            "objdump:avr-objdump"
+            "size:avr-size"
+            "strip:avr-strip"
+          )
+          for item in "${TOOLS[@]}"; do
+            bare="${item%%:*}"
+            prefixed="${item#*:}"
+            if [ -f "$BIN/$prefixed" ]; then
+              cp "$BIN/$prefixed" "$BIN/$bare"
+              echo "✅ Created $bare from $prefixed"
+            else
+              echo "❌ MISSING: $prefixed"
+              exit 1
+            fi
+          done
+          ls -lh "$BIN"
 
       - name: Strip and verify binaries
         run: |
@@ -415,7 +432,8 @@ jobs:
           REQUIRED=(
             avr-gcc avr-g++ avr-as avr-ld avr-ar
             avr-objcopy avr-objdump avr-nm avr-ranlib avr-size
-            ld cc1 collect2
+            ld as ar ranlib nm objcopy objdump size strip
+            cc1 collect2
           )
           MISSING=0
           echo "=== Binary completeness check ==="
