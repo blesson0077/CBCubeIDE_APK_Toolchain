@@ -121,14 +121,24 @@ jobs:
         run: |
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
+      
+          # ── Bionic patch: disable posix_spawn in libiberty/pex-unix.c ──────────
+          # Android bionic (NDK r26d) does not expose posix_spawn* in strict C99
+          # mode. libiberty uses HAVE_POSIX_SPAWN to gate the entire block.
+          # Force it undefined so pex-unix falls back to fork/exec instead.
+          sed -i 's/^#define HAVE_POSIX_SPAWN.*$/\/* #undef HAVE_POSIX_SPAWN *\//' \
+              binutils-2.42/libiberty/pex-unix.c
+          # Also patch config.in / configure so the autoconf check can't re-enable it
+          sed -i 's/HAVE_POSIX_SPAWN/HAVE_POSIX_SPAWN_DISABLED/g' \
+              binutils-2.42/libiberty/configure
+          echo "✅ pex-unix.c posix_spawn patch applied"
+      
           mkdir build-binutils && cd build-binutils
-
-          # Clear NDK global flags — binutils links its own host tools and
-          # rejects -fuse-ld=bfd. Pass only what we need explicitly.
+      
           unset LDFLAGS
           unset CFLAGS
           unset CXXFLAGS
-
+      
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
@@ -138,14 +148,13 @@ jobs:
             --disable-shared --enable-static \
             CFLAGS="-Os" \
             LDFLAGS="-static"
-
+      
           make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
           make install    || { echo "❌ binutils make install FAILED"; exit 1; }
-
+      
           echo "=== binutils install contents ==="
           ls -lh "${{ env.INSTALL_DIR }}/bin/"
-
-          # Hard-stop if any critical binary is missing
+      
           for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
             if [ ! -f "${{ env.INSTALL_DIR }}/bin/$b" ]; then
               echo "❌ MISSING after install: $b"
@@ -154,7 +163,6 @@ jobs:
             echo "✅ $b"
           done
           echo "=== binutils all good ==="
-
       # ── GCC ───────────────────────────────────────────────────────────────
       - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
         run: |
