@@ -106,51 +106,43 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
 
-          # ── Source patch: remove posix_spawn block from pex-unix.c ────────
-          # Belt-and-suspenders alongside the cache file approach below.
-          cat > /tmp/patch_pex.py << 'PYEOF'
+          # ── Source patch: force-undefine glob and posix_spawn in pex-unix.c and ldelf.c ──
+          cat > /tmp/patch_binutils.py << 'PYEOF'
           import pathlib, glob as g
           
-          def remove_posix_spawn_block(src):
-              lines = src.splitlines(keepends=True)
-              out = []
-              depth = 0
-              in_block = False
-              for line in lines:
-                  s = line.strip()
-                  if not in_block and s == '#ifdef HAVE_POSIX_SPAWN':
-                      in_block = True
-                      depth = 1
-                      out.append('/* posix_spawn removed: not in bionic API 24 */\n')
-                      continue
-                  if in_block:
-                      if s.startswith('#if'):
-                          depth += 1
-                      elif s.startswith('#endif'):
-                          depth -= 1
-                          if depth == 0:
-                              in_block = False
-                      continue
-                  out.append(line)
-              return ''.join(out)
+          def force_undefs(file_path):
+              p = pathlib.Path(file_path)
+              if not p.exists():
+                  return
+              content = p.read_text()
+              
+              undefs = "\n/* Forced undefs for Android Bionic API level < 28 compatibility */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
+              
+              if "Forced undefs for Android Bionic" in content:
+                  print(f"Already patched: {file_path}")
+                  return
+                  
+              if '#include "config.h"' in content:
+                  content = content.replace('#include "config.h"', '#include "config.h"' + undefs)
+              elif '#include <config.h>' in content:
+                  content = content.replace('#include <config.h>', '#include <config.h>' + undefs)
+              else:
+                  content = undefs + content
+                  
+              p.write_text(content)
+              print(f"Patched: {file_path}")
           
           for path in g.glob("binutils-2.42/**/pex-unix.c", recursive=True):
-              p = pathlib.Path(path)
-              src = p.read_text()
-              if 'HAVE_POSIX_SPAWN' in src:
-                  patched = remove_posix_spawn_block(src)
-                  p.write_text(patched)
-                  remaining = 'HAVE_POSIX_SPAWN' in patched
-                  print(f"PATCHED {path} | HAVE_POSIX_SPAWN still present: {remaining}")
-              else:
-                  print(f"Already clean: {path}")
+              force_undefs(path)
+          for path in g.glob("binutils-2.42/**/ldelf.c", recursive=True):
+              force_undefs(path)
           PYEOF
-          python3 /tmp/patch_pex.py
+          python3 /tmp/patch_binutils.py
 
           echo "=== verify pex-unix.c clean ==="
           grep -n "posix_spawn" binutils-2.42/libiberty/pex-unix.c \
-            && echo "WARNING: posix_spawn still present" \
-            || echo "OK: posix_spawn fully removed"
+            && echo "WARNING: posix_spawn still present in pex-unix.c" \
+            || echo "OK"
 
           mkdir build-binutils && cd build-binutils
 
@@ -158,14 +150,6 @@ jobs:
           unset CFLAGS
           unset CXXFLAGS
 
-          # ── CRITICAL: bionic.cache shared across ALL sub-configures ───────
-          # Without --cache-file, the ld/ bfd/ sub-configures run their OWN
-          # configure scripts independently and detect glob/posix_spawn as
-          # available (because the BUILD machine is x86_64 Linux which has them).
-          # --cache-file=bionic.cache makes every sub-configure read+write the
-          # same file, so our "function not available" overrides propagate to
-          # the ld/ subdir that builds avr-ld (where glob and posix_spawn
-          # are actually linked).
           cat > bionic.cache << 'CEOF'
           ac_cv_func_posix_spawn=no
           ac_cv_func_posix_spawnp=no
@@ -181,8 +165,8 @@ jobs:
           ac_cv_header_glob_h=no
           CEOF
 
-          echo "=== bionic.cache ==="
-          cat bionic.cache
+          export CFLAGS="-Os -Wno-implicit-function-declaration"
+          export LDFLAGS="-fuse-ld=bfd -static"
 
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
@@ -193,9 +177,7 @@ jobs:
             --disable-werror \
             --disable-shared \
             --enable-static \
-            --cache-file="${PWD}/bionic.cache" \
-            CFLAGS="-Os -Wno-implicit-function-declaration" \
-            LDFLAGS="-fuse-ld=bfd -static"
+            --cache-file="${PWD}/bionic.cache"
 
           # ── Build: capture full log so GitHub truncation doesn't hide errors
           make -j$(nproc) 2>&1 | tee /tmp/binutils_build.log
@@ -235,44 +217,36 @@ jobs:
             -e '/putc_unlocked/d'    \
             -e '/putchar_unlocked/d'
 
-          # Patch 2: remove posix_spawn block from GCC's bundled libiberty
-          cat > /tmp/patch_gcc_pex.py << 'PYEOF'
+          # Patch 2: force-undefine glob and posix_spawn in GCC bundled libiberty
+          cat > /tmp/patch_gcc_iberty.py << 'PYEOF'
           import pathlib, glob as g
           
-          def remove_posix_spawn_block(src):
-              lines = src.splitlines(keepends=True)
-              out = []
-              depth = 0
-              in_block = False
-              for line in lines:
-                  s = line.strip()
-                  if not in_block and s == '#ifdef HAVE_POSIX_SPAWN':
-                      in_block = True
-                      depth = 1
-                      out.append('/* posix_spawn removed: not in bionic API 24 */\n')
-                      continue
-                  if in_block:
-                      if s.startswith('#if'):
-                          depth += 1
-                      elif s.startswith('#endif'):
-                          depth -= 1
-                          if depth == 0:
-                              in_block = False
-                      continue
-                  out.append(line)
-              return ''.join(out)
+          def force_undefs(file_path):
+              p = pathlib.Path(file_path)
+              if not p.exists():
+                  return
+              content = p.read_text()
+              
+              undefs = "\n/* Forced undefs for Android Bionic API level < 28 compatibility */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
+              
+              if "Forced undefs for Android Bionic" in content:
+                  print(f"Already patched: {file_path}")
+                  return
+                  
+              if '#include "config.h"' in content:
+                  content = content.replace('#include "config.h"', '#include "config.h"' + undefs)
+              elif '#include <config.h>' in content:
+                  content = content.replace('#include <config.h>', '#include <config.h>' + undefs)
+              else:
+                  content = undefs + content
+                  
+              p.write_text(content)
+              print(f"Patched: {file_path}")
           
           for path in g.glob("gcc-12.2.0/**/pex-unix.c", recursive=True):
-              p = pathlib.Path(path)
-              src = p.read_text()
-              if 'HAVE_POSIX_SPAWN' in src:
-                  patched = remove_posix_spawn_block(src)
-                  p.write_text(patched)
-                  print(f"PATCHED: {path}")
-              else:
-                  print(f"Already clean: {path}")
+              force_undefs(path)
           PYEOF
-          python3 /tmp/patch_gcc_pex.py
+          python3 /tmp/patch_gcc_iberty.py
 
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
