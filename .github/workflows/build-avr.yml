@@ -122,19 +122,27 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
       
-          # ── Bionic patch: disable posix_spawn in libiberty/pex-unix.c ──────────
-          # Android bionic (NDK r26d) does not expose posix_spawn* in strict C99
-          # mode. libiberty uses HAVE_POSIX_SPAWN to gate the entire block.
-          # Force it undefined so pex-unix falls back to fork/exec instead.
-          sed -i 's/^#define HAVE_POSIX_SPAWN.*$/\/* #undef HAVE_POSIX_SPAWN *\//' \
+          # ── Bionic patch: force-disable posix_spawn in pex-unix.c ──────────────
+          # configure detects posix_spawn as available (bionic has the symbols at
+          # link time) and writes HAVE_POSIX_SPAWN into config.h. But bionic NDK
+          # r26d does NOT declare the prototypes in its headers under -pedantic,
+          # so the compiler errors with 15x "undeclared function" errors.
+          #
+          # The only reliable fix: inject #undef HAVE_POSIX_SPAWN directly into
+          # pex-unix.c AFTER the #include "config.h" line, overriding config.h.
+          # This forces libiberty to use the fork()+exec() path instead.
+          sed -i 's|#ifdef HAVE_CONFIG_H|#ifdef HAVE_CONFIG_H\n/* Android bionic: posix_spawn symbols exist but headers do not declare\n   prototypes under -pedantic. Force fork+exec path. */\n#undef HAVE_POSIX_SPAWN|' \
               binutils-2.42/libiberty/pex-unix.c
-          # Also patch config.in / configure so the autoconf check can't re-enable it
-          sed -i 's/HAVE_POSIX_SPAWN/HAVE_POSIX_SPAWN_DISABLED/g' \
-              binutils-2.42/libiberty/configure
-          echo "✅ pex-unix.c posix_spawn patch applied"
+      
+          # Verify the patch landed
+          echo "=== pex-unix.c patch check ==="
+          grep -n "HAVE_POSIX_SPAWN" binutils-2.42/libiberty/pex-unix.c | head -10
+          echo "✅ patch applied"
       
           mkdir build-binutils && cd build-binutils
       
+          # Clear NDK global flags — binutils links its own host tools and
+          # rejects -fuse-ld=bfd. Pass only what we need explicitly.
           unset LDFLAGS
           unset CFLAGS
           unset CXXFLAGS
