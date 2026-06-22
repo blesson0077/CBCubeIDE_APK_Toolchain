@@ -115,43 +115,28 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
 
-          # ── Bionic patch: pex-unix.c uses posix_spawn* without including <spawn.h>
-          # libiberty's own Makefile adds -pedantic which makes clang treat
-          # undeclared function calls as hard errors — cannot be overridden by
-          # configure CFLAGS. Only source-level fix is reliable.
-          # Strategy: prepend #include <spawn.h> so prototypes are declared,
-          # AND undef HAVE_POSIX_SPAWN so the broken code path is compiled out.
-          # The undef means pex-unix.c will use the fork/exec path instead,
-          # which works fine on Android.
-          python3 - << 'PYEOF'
+          cat > /tmp/patch_pex.py << 'PYEOF'
           import pathlib
           
           p = pathlib.Path("binutils-2.42/libiberty/pex-unix.c")
           src = p.read_text()
           
-          header = """\
-          /* Android bionic patch: include spawn.h for prototypes, then disable
-             the posix_spawn code path (fork/exec path works fine on Android). */
-          #include <spawn.h>
-          #ifdef HAVE_POSIX_SPAWN
-          #undef HAVE_POSIX_SPAWN
-          #endif
-          """
-
+          header = "/* Android bionic patch */\n#include <spawn.h>\n#ifdef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWN\n#endif\n"
+          
           if "Android bionic patch" not in src:
               src = header + src
               p.write_text(src)
-              print("PATCH APPLIED successfully")
+              print("PATCH APPLIED")
           else:
-              print("Patch already present, skipping")
+              print("Already patched")
           
-              print("=== First 10 lines of pex-unix.c ===")
-              print('\n'.join(src.splitlines()[:10]))
-              PYEOF
+          print("First 6 lines:")
+          print('\n'.join(src.splitlines()[:6]))
+          PYEOF
+          python3 /tmp/patch_pex.py
 
-          # Confirm the patch landed
-          echo "=== pex-unix.c first 8 lines ==="
-          head -8 "binutils-2.42/libiberty/pex-unix.c"
+          echo "=== pex-unix.c first 6 lines ==="
+          head -6 "binutils-2.42/libiberty/pex-unix.c"
 
           mkdir build-binutils && cd build-binutils
 
@@ -174,18 +159,14 @@ jobs:
           make -j$(nproc) || { echo "❌ binutils make FAILED"; exit 1; }
           make install    || { echo "❌ binutils make install FAILED"; exit 1; }
 
-          echo "=== binutils install contents ==="
           ls -lh "${{ env.INSTALL_DIR }}/bin/"
 
           for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
-            if [ ! -f "${{ env.INSTALL_DIR }}/bin/$b" ]; then
-              echo "❌ MISSING after install: $b"
-              exit 1
-            fi
-            echo "✅ $b"
+            [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] \
+              && echo "✅ $b" \
+              || { echo "❌ MISSING: $b"; exit 1; }
           done
           echo "=== binutils all good ==="
-
       # ── GCC ───────────────────────────────────────────────────────────────
       - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
         run: |
