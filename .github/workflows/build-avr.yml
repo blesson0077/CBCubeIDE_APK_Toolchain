@@ -6,7 +6,7 @@ on:
       release_version:
         description: 'Release version (e.g. v1.0.12)'
         required: true
-        default: 'v1.0.14'
+        default: 'v1.0.15'
 
 jobs:
   build:
@@ -32,7 +32,6 @@ jobs:
             binutils-aarch64-linux-gnu \
             gcc-avr
 
-      # ── NDK setup ─────────────────────────────────────────────────────────
       - name: Download and configure Android NDK r26d
         run: |
           wget -q "https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip"
@@ -41,9 +40,6 @@ jobs:
           NDK="${{ github.workspace }}/android-ndk-${NDK_VER}"
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 
-          # KEY FIX: symlink GNU ld.bfd into NDK toolchain bin dir.
-          # NDK's lld rejects GCC's misaligned AArch64 relocations (SIGSYS root cause).
-          # GNU ld.bfd is permissive about alignment and produces bionic-compatible output.
           ln -sf /usr/bin/aarch64-linux-gnu-ld "$TC/bin/ld.bfd"
           echo "ld.bfd -> $(readlink -f $TC/bin/ld.bfd)"
 
@@ -62,14 +58,10 @@ jobs:
                    "${{ env.INSTALL_DIR }}/etc" \
                    "${{ env.DEPS_DIR }}"
 
-      # ── Static deps (GMP / MPFR / MPC) built with NDK clang ──────────────
       - name: Build GMP 6.3.0 (static, NDK/bionic)
         run: |
           wget -q "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
           tar -xJf gmp-6.3.0.tar.xz
-          # Android bionic does not implement nl_langinfo().
-          # GMP uses it only to get the decimal point character.
-          # Hardcode "." (correct for C locale, which is what we always want).
           sed -i 's|nl_langinfo (RADIXCHAR)|"."|g' gmp-6.3.0/gmp-impl.h
           mkdir build-gmp && cd build-gmp
           ../gmp-6.3.0/configure \
@@ -109,7 +101,6 @@ jobs:
             CFLAGS="-Os"
           make -j$(nproc) && make install
 
-      # ── binutils ──────────────────────────────────────────────────────────
       - name: Build binutils 2.42 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
@@ -117,22 +108,19 @@ jobs:
 
           cat > /tmp/patch_pex.py << 'PYEOF'
           import pathlib
-          
           p = pathlib.Path("binutils-2.42/libiberty/pex-unix.c")
           src = p.read_text()
-          
           header = "/* Android bionic patch */\n#include <spawn.h>\n#ifdef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWN\n#endif\n"
-          
           if "Android bionic patch" not in src:
               src = header + src
               p.write_text(src)
               print("PATCH APPLIED")
           else:
               print("Already patched")
-          
           print("First 6 lines:")
           print('\n'.join(src.splitlines()[:6]))
           PYEOF
+
           python3 /tmp/patch_pex.py
 
           echo "=== pex-unix.c first 6 lines ==="
@@ -167,16 +155,12 @@ jobs:
               || { echo "❌ MISSING: $b"; exit 1; }
           done
           echo "=== binutils all good ==="
-      # ── GCC ───────────────────────────────────────────────────────────────
+
       - name: Build GCC 12.2.0 (target=avr, host=aarch64-android)
         run: |
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
 
-          # Do NOT run download_prerequisites — we supply our own NDK-built deps.
-
-          # Bionic patch 1: GCC system.h redefines stdio functions to *_unlocked
-          # variants that bionic does not expose in C99 strict mode. Delete them.
           find gcc-12.2.0 -name "system.h" | xargs sed -i \
             -e '/fputc_unlocked/d'   \
             -e '/fputs_unlocked/d'   \
@@ -190,30 +174,21 @@ jobs:
           find gcc-12.2.0 -name "system.h" | xargs grep -l "unlocked" 2>/dev/null \
             && echo "WARNING: some unlocked refs remain" || echo "All clean"
 
-          # Bionic patch 2: GCC's libiberty also has pex-unix.c with the same
-          # posix_spawn* issue. Patch it the same way.
-          python3 - << 'PYEOF'
-import pathlib, glob
+          cat > /tmp/patch_gcc_pex.py << 'PYEOF'
+          import pathlib, glob
+          header = "/* Android bionic patch */\n#include <spawn.h>\n#ifdef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWN\n#endif\n"
+          for path_str in glob.glob("gcc-12.2.0/**/pex-unix.c", recursive=True):
+              p = pathlib.Path(path_str)
+              src = p.read_text()
+              if "Android bionic patch" not in src:
+                  src = header + src
+                  p.write_text(src)
+                  print("PATCHED: " + path_str)
+              else:
+                  print("Already patched: " + path_str)
+          PYEOF
 
-header = """\
-/* Android bionic patch: include spawn.h for prototypes, then disable
-   the posix_spawn code path (fork/exec path works fine on Android). */
-#include <spawn.h>
-#ifdef HAVE_POSIX_SPAWN
-#undef HAVE_POSIX_SPAWN
-#endif
-"""
-
-for path_str in glob.glob("gcc-12.2.0/**/pex-unix.c", recursive=True):
-    p = pathlib.Path(path_str)
-    src = p.read_text()
-    if "Android bionic patch" not in src:
-        src = header + src
-        p.write_text(src)
-        print(f"PATCHED: {path_str}")
-    else:
-        print(f"Already patched: {path_str}")
-PYEOF
+          python3 /tmp/patch_gcc_pex.py
 
           mkdir build-gcc && cd build-gcc
           export PATH="${{ env.INSTALL_DIR }}/bin:$PATH"
@@ -249,16 +224,11 @@ PYEOF
           echo "=== GCC done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
-      # ── avr-libc ──────────────────────────────────────────────────────────
       - name: Build avr-libc 2.1.0
         run: |
           wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
           tar -xjf avr-libc-2.1.0.tar.bz2
           mkdir build-avr-libc && cd build-avr-libc
-
-          # avr-libc compiles FOR the avr target using the system x86_64 avr-gcc.
-          # Explicitly override CC/AR/RANLIB/STRIP so the NDK env vars (llvm-ar etc.)
-          # don't leak in — avr-libc configure rejects non-GNU ar with "Wrong archiver".
           ../avr-libc-2.1.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --host=avr \
@@ -267,11 +237,9 @@ PYEOF
             AR=/usr/bin/avr-ar \
             RANLIB=/usr/bin/avr-ranlib \
             STRIP=/usr/bin/avr-strip
-
           make -j$(nproc) && make install
           echo "=== avr-libc done ==="
 
-      # ── avrdude ───────────────────────────────────────────────────────────
       - name: Build avrdude 7.3 (host=aarch64-android)
         run: |
           wget -v "https://github.com/avrdudes/avrdude/archive/refs/tags/v7.3.tar.gz" \
@@ -280,7 +248,6 @@ PYEOF
           AVRDUDE_SRC=$(ls -d avrdude-*/ | head -1)
           echo "Source: $AVRDUDE_SRC"
           mkdir build-avrdude && cd build-avrdude
-
           cmake "../$AVRDUDE_SRC" \
             -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}" \
             -DCMAKE_C_COMPILER="${{ env.CC }}" \
@@ -299,18 +266,11 @@ PYEOF
             -DUSE_LINUXSPI=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=MinSizeRel
-
           make -j$(nproc) && make install
-
           find . -name "avrdude.conf" \
             -exec cp -v {} "${{ env.INSTALL_DIR }}/etc/" \; 2>/dev/null || true
-
           echo "=== avrdude done ==="
 
-      # ── ADD bin/ld so GCC's driver can find the linker ────────────────────
-      # GCC's driver exec()s bare "ld", not "avr-ld", when it's in the same
-      # bin/ directory as itself. Without this copy the link stage dies with:
-      #   avr-gcc: fatal error: cannot execute 'ld': execvp: No such file or directory
       - name: Create bin/ld from avr-ld
         run: |
           BIN="${{ env.INSTALL_DIR }}/bin"
@@ -322,7 +282,6 @@ PYEOF
           echo "✅ bin/ld created (copy of avr-ld)"
           ls -lh "$BIN/avr-ld" "$BIN/ld"
 
-      # ── Verify + strip + package ──────────────────────────────────────────
       - name: Strip and verify binaries
         run: |
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
@@ -330,7 +289,6 @@ PYEOF
               "${{ env.STRIP }}" "$f" 2>/dev/null && echo "stripped: $(basename $f)" || true
             fi
           done
-
           echo "=== verify ==="
           BAD=0
           for f in "${{ env.INSTALL_DIR }}/bin"/*; do
@@ -343,7 +301,6 @@ PYEOF
           [ "$BAD" = "0" ] || { echo "Wrong arch found"; exit 1; }
           echo "✅ All aarch64"
 
-      # ── Mandatory pre-package binary check ───────────────────────────────
       - name: Verify all required binaries are present
         run: |
           REQUIRED=(
@@ -377,7 +334,6 @@ PYEOF
           if [ "$MISSING" = "1" ]; then
             echo ""
             echo "One or more required binaries are missing."
-            echo "Fix the build step that produces them before re-running."
             exit 1
           fi
           echo ""
@@ -423,7 +379,7 @@ PYEOF
           body: |
             ## AVR Toolchain for Android AArch64
 
-            Built with Android NDK r26d (API 24). Statically linked against bionic — no SIGSYS, no runtime dependencies.
+            Built with Android NDK r26d (API 24). Statically linked against bionic.
 
             ### Components
             - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
