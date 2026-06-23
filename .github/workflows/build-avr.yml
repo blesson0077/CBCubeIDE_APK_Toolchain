@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Release version (e.g. v1.0.15)'
+        description: 'Release version (e.g. v1.0.16)'
         required: true
-        default: 'v1.0.15'
+        default: 'v1.0.16'
 
 jobs:
   build:
@@ -15,7 +15,7 @@ jobs:
       contents: write
     env:
       NDK_VER:     r26d
-      API_LEVEL:   24
+      API_LEVEL:   28
       INSTALL_DIR: ${{ github.workspace }}/avr-toolchain-out
       DEPS_DIR:    ${{ github.workspace }}/ndk-static-deps
       NATIVE_DIR:  ${{ github.workspace }}/avr-gcc-native
@@ -46,6 +46,9 @@ jobs:
           ln -sf /usr/bin/aarch64-linux-gnu-ld "$TC/bin/ld.bfd"
           echo "ld.bfd -> $(readlink -f $TC/bin/ld.bfd)"
 
+          # API 28 is the minimum that has posix_spawn + glob in bionic.
+          # Using API_LEVEL=28 means configure finds them, compiles them in,
+          # linker succeeds — no source patches or cache files needed.
           echo "CC=$TC/bin/aarch64-linux-android${API_LEVEL}-clang"    >> $GITHUB_ENV
           echo "CXX=$TC/bin/aarch64-linux-android${API_LEVEL}-clang++" >> $GITHUB_ENV
           echo "AR=$TC/bin/llvm-ar"                                     >> $GITHUB_ENV
@@ -53,9 +56,9 @@ jobs:
           echo "NM=$TC/bin/llvm-nm"                                     >> $GITHUB_ENV
           echo "STRIP=$TC/bin/llvm-strip"                               >> $GITHUB_ENV
           echo "NDK_TC=$TC"                                             >> $GITHUB_ENV
-          # -fuse-ld=bfd : use GNU ld.bfd (symlinked above), avoids lld strict alignment
-          # -static       : use bionic static CRT (crtbegin_static.o), avoids dynbss issue
-          #                 NDK/bionic static binaries use Android-allowed syscalls → no SIGSYS
+          # -fuse-ld=bfd : use GNU ld.bfd, avoids lld strict AArch64 alignment
+          # -static       : use bionic static CRT → no dynbss alignment issue,
+          #                 no SIGSYS (bionic syscalls are on Android whitelist)
           echo "LDFLAGS=-fuse-ld=bfd -static"                          >> $GITHUB_ENV
           echo "CFLAGS=-Os"                                             >> $GITHUB_ENV
           echo "CXXFLAGS=-Os"                                           >> $GITHUB_ENV
@@ -68,7 +71,7 @@ jobs:
         run: |
           wget -q "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
           tar -xJf gmp-6.3.0.tar.xz
-          # Android bionic has no nl_langinfo — hardcode C-locale decimal point
+          # bionic has no nl_langinfo — hardcode C-locale decimal point
           sed -i 's|nl_langinfo (RADIXCHAR)|"."|g' gmp-6.3.0/gmp-impl.h
           mkdir build-gmp && cd build-gmp
           ../gmp-6.3.0/configure \
@@ -112,47 +115,9 @@ jobs:
         run: |
           wget -q "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
           tar -xJf binutils-2.42.tar.xz
-
-          # Patch: force-undefine posix_spawn and glob (not in bionic API < 28)
-          cat > /tmp/patch_binutils.py << 'PYEOF'
-          import pathlib, glob as g
-          def force_undefs(file_path):
-              p = pathlib.Path(file_path)
-              if not p.exists(): return
-              content = p.read_text()
-              undefs = "\n/* Forced undefs for Android Bionic API level < 28 */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
-              if "Forced undefs for Android Bionic" in content: return
-              if '#include "config.h"' in content:
-                  content = content.replace('#include "config.h"', '#include "config.h"' + undefs)
-              elif '#include <config.h>' in content:
-                  content = content.replace('#include <config.h>', '#include <config.h>' + undefs)
-              else:
-                  content = undefs + content
-              p.write_text(content)
-              print(f"Patched: {file_path}")
-          for path in g.glob("binutils-2.42/**/pex-unix.c", recursive=True): force_undefs(path)
-          for path in g.glob("binutils-2.42/**/ldelf.c",    recursive=True): force_undefs(path)
-          PYEOF
-          python3 /tmp/patch_binutils.py
-
           mkdir build-binutils && cd build-binutils
 
-          # Override CFLAGS/LDFLAGS locally for binutils
-          cat > bionic.cache << 'CEOF'
-          ac_cv_func_posix_spawn=no
-          ac_cv_func_posix_spawnp=no
-          ac_cv_func_posix_spawnattr_init=no
-          ac_cv_func_posix_spawnattr_setflags=no
-          ac_cv_func_posix_spawnattr_destroy=no
-          ac_cv_func_posix_spawn_file_actions_init=no
-          ac_cv_func_posix_spawn_file_actions_destroy=no
-          ac_cv_func_posix_spawn_file_actions_adddup2=no
-          ac_cv_func_posix_spawn_file_actions_addclose=no
-          ac_cv_func_glob=no
-          ac_cv_func_globfree=no
-          ac_cv_header_glob_h=no
-          CEOF
-
+          # No source patches or cache files needed — API 28 has posix_spawn + glob
           ../binutils-2.42/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --target=avr \
@@ -162,8 +127,7 @@ jobs:
             --disable-werror \
             --disable-shared \
             --enable-static \
-            --cache-file="${PWD}/bionic.cache" \
-            CFLAGS="-Os -Wno-implicit-function-declaration" \
+            CFLAGS="-Os" \
             LDFLAGS="-fuse-ld=bfd -static"
 
           make -j$(nproc) 2>&1 | tee /tmp/binutils_build.log
@@ -174,7 +138,8 @@ jobs:
           make install
 
           for b in avr-as avr-ld avr-ar avr-ranlib avr-objcopy avr-objdump avr-nm avr-size; do
-            [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] && echo "✅ $b" || { echo "❌ MISSING: $b"; exit 1; }
+            [ -f "${{ env.INSTALL_DIR }}/bin/$b" ] \
+              && echo "✅ $b" || { echo "❌ MISSING: $b"; exit 1; }
           done
           echo "=== binutils done ==="
 
@@ -183,7 +148,7 @@ jobs:
           wget -q "https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz"
           tar -xJf gcc-12.2.0.tar.xz
 
-          # Patch 1: remove *_unlocked stdio (not visible in bionic C99 strict mode)
+          # Patch: remove *_unlocked stdio macros — bionic C99 mode doesn't expose them
           find gcc-12.2.0 -name "system.h" | xargs sed -i \
             -e '/fputc_unlocked/d'   \
             -e '/fputs_unlocked/d'   \
@@ -192,54 +157,12 @@ jobs:
             -e '/getchar_unlocked/d' \
             -e '/putc_unlocked/d'    \
             -e '/putchar_unlocked/d'
-          echo "Patched system.h files — no unlocked refs remaining:"
-          find gcc-12.2.0 -name "system.h" | xargs grep -l "unlocked" 2>/dev/null || echo "clean"
-
-          # Patch 2: force-undefine posix_spawn/glob in GCC's bundled libiberty
-          cat > /tmp/patch_gcc_iberty.py << 'PYEOF'
-          import pathlib, glob as g
-          def force_undefs(file_path):
-              p = pathlib.Path(file_path)
-              if not p.exists(): return
-              content = p.read_text()
-              undefs = "\n/* Forced undefs for Android Bionic API level < 28 */\n#undef HAVE_POSIX_SPAWN\n#undef HAVE_POSIX_SPAWNP\n#undef HAVE_GLOB\n#undef HAVE_GLOB_H\n"
-              if "Forced undefs for Android Bionic" in content: return
-              if '#include "config.h"' in content:
-                  content = content.replace('#include "config.h"', '#include "config.h"' + undefs)
-              elif '#include <config.h>' in content:
-                  content = content.replace('#include <config.h>', '#include <config.h>' + undefs)
-              else:
-                  content = undefs + content
-              p.write_text(content)
-              print(f"Patched: {file_path}")
-          for path in g.glob("gcc-12.2.0/**/pex-unix.c", recursive=True): force_undefs(path)
-          PYEOF
-          python3 /tmp/patch_gcc_iberty.py
+          find gcc-12.2.0 -name "system.h" | xargs grep -l "unlocked" 2>/dev/null \
+            && echo "WARNING: unlocked refs remain" || echo "system.h clean"
 
           mkdir build-gcc && cd build-gcc
-          # NOTE: deliberately NOT adding INSTALL_DIR/bin to PATH here. The binutils
-          # built in the previous step (avr-as, avr-ld, ...) were built with
-          # host=aarch64-linux-android — they are themselves Android ELF binaries and
-          # CANNOT run on this x86_64 runner. Putting them ahead of /usr/bin in PATH
-          # would shadow the working x86_64 avr-as/avr-ld (from the apt gcc-avr
-          # package) that GCC's configure needs to execute for its assembler/linker
-          # capability probes. The default PATH (with /usr/bin) already has working
-          # ones, so no PATH change is needed.
-
-          cat > bionic.cache << 'CEOF'
-          ac_cv_func_posix_spawn=no
-          ac_cv_func_posix_spawnp=no
-          ac_cv_func_posix_spawnattr_init=no
-          ac_cv_func_posix_spawnattr_setflags=no
-          ac_cv_func_posix_spawnattr_destroy=no
-          ac_cv_func_posix_spawn_file_actions_init=no
-          ac_cv_func_posix_spawn_file_actions_destroy=no
-          ac_cv_func_posix_spawn_file_actions_adddup2=no
-          ac_cv_func_posix_spawn_file_actions_addclose=no
-          ac_cv_func_glob=no
-          ac_cv_func_globfree=no
-          ac_cv_header_glob_h=no
-          CEOF
+          # Do NOT add INSTALL_DIR/bin to PATH — those are aarch64 Android binaries
+          # that cannot execute on this x86_64 runner. configure needs x86_64 avr-as/ld.
 
           ../gcc-12.2.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
@@ -262,7 +185,6 @@ jobs:
             --with-gmp="${{ env.DEPS_DIR }}" \
             --with-mpfr="${{ env.DEPS_DIR }}" \
             --with-mpc="${{ env.DEPS_DIR }}" \
-            --cache-file="${PWD}/bionic.cache" \
             CFLAGS="-Os -Wno-implicit-function-declaration" \
             CXXFLAGS="-Os" \
             LDFLAGS="-fuse-ld=bfd -static" \
@@ -272,37 +194,23 @@ jobs:
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" != "0" ]; then
             tail -150 /tmp/gcc_build.log
-            grep -E "error:|undefined symbol" /tmp/gcc_build.log | head -60
+            grep -E "^.*error:" /tmp/gcc_build.log | head -40
             exit 1
           fi
           make install-gcc
           echo "=== GCC done ==="
           ls "${{ env.INSTALL_DIR }}/bin/"
 
-      # ── Critical fix: produce libgcc.a for the avr target ──
-      # `make all-gcc` above only built the host driver/cc1/cc1plus — it never builds
-      # target runtime libraries (libgcc.a). That's needed for `make all-target-libgcc`,
-      # which has to EXECUTE the just-built avr-gcc to compile libgcc's sources — but
-      # that avr-gcc is an Android ELF binary and can't run on this x86_64 runner
-      # (classic "Canadian Cross" limitation). The fix: build a second, fully NATIVE
-      # copy of the same GCC 12.2.0 (host=build=x86_64-linux-gnu, same target=avr)
-      # whose own compiler CAN run here, use IT to build libgcc.a, then copy that into
-      # the android-hosted install tree below. libgcc.a is pure AVR object code, so it
-      # doesn't matter which host produced it — only that the GCC version and default
-      # multilib list match, which they do (same gcc-12.2.0 source tree, same target).
-      #
-      # NOTE: this intentionally only builds libgcc, not libstdc++. AVR libstdc++
-      # support is not solid in stock GCC/avr-libc (no real OS/threads, very limited
-      # multilib support for the STL), and most embedded AVR C++ code avoids the
-      # runtime anyway (-fno-exceptions -fno-rtti, header-only templates). cc1plus
-      # will still work for that kind of code; anything needing iostream/full STL
-      # containers will need further work beyond this fix.
-      - name: Build native avr-gcc 12.2.0 (host=build) — for target libgcc only
+      # Canadian Cross limitation: all-target-libgcc needs to EXECUTE avr-gcc,
+      # but our avr-gcc is an Android ELF that can't run on the x86_64 runner.
+      # Solution: build a native x86_64 avr-gcc, use it to produce libgcc.a,
+      # then copy it into the Android-hosted install tree.
+      # libgcc.a is pure AVR object code — same regardless of which host built it.
+      - name: Build native avr-gcc 12.2.0 (x86_64) for libgcc only
         run: |
           unset CC CXX AR RANLIB NM STRIP LDFLAGS CFLAGS CXXFLAGS
-
           mkdir -p "${{ env.NATIVE_DIR }}"
-          mkdir -p build-gcc-native && cd build-gcc-native
+          mkdir build-gcc-native && cd build-gcc-native
 
           ../gcc-12.2.0/configure \
             --prefix="${{ env.NATIVE_DIR }}" \
@@ -328,40 +236,30 @@ jobs:
             CFLAGS_FOR_TARGET="-Os"
 
           make -j$(nproc) all-gcc 2>&1 | tee /tmp/gcc_native_build.log
-          BUILD_EXIT=${PIPESTATUS[0]}
-          if [ "$BUILD_EXIT" != "0" ]; then
-            tail -150 /tmp/gcc_native_build.log; exit 1
-          fi
+          [ ${PIPESTATUS[0]} -eq 0 ] || { tail -100 /tmp/gcc_native_build.log; exit 1; }
 
           make -j$(nproc) all-target-libgcc 2>&1 | tee /tmp/gcc_native_libgcc.log
-          BUILD_EXIT=${PIPESTATUS[0]}
-          if [ "$BUILD_EXIT" != "0" ]; then
-            tail -150 /tmp/gcc_native_libgcc.log; exit 1
-          fi
+          [ ${PIPESTATUS[0]} -eq 0 ] || { tail -100 /tmp/gcc_native_libgcc.log; exit 1; }
 
           make install-target-libgcc
           echo "=== native libgcc done ==="
           find "${{ env.NATIVE_DIR }}" -name "libgcc.a"
 
-      - name: Merge target libgcc into the android-hosted toolchain
+      - name: Merge libgcc.a into android-hosted toolchain
         run: |
           mkdir -p "${{ env.INSTALL_DIR }}/lib/gcc/avr/12.2.0"
           cp -a "${{ env.NATIVE_DIR }}/lib/gcc/avr/12.2.0/." \
                 "${{ env.INSTALL_DIR }}/lib/gcc/avr/12.2.0/"
-
           FOUND=$(find "${{ env.INSTALL_DIR }}" -name "libgcc.a" | head -1)
-          if [ -z "$FOUND" ]; then
-            echo "❌ libgcc.a missing after merge"; exit 1
-          fi
-          echo "✅ libgcc.a present: $FOUND"
+          [ -n "$FOUND" ] && echo "✅ libgcc.a: $FOUND" || { echo "❌ libgcc.a missing"; exit 1; }
 
       - name: Build avr-libc 2.1.0
         run: |
           wget -q "https://download.savannah.gnu.org/releases/avr-libc/avr-libc-2.1.0.tar.bz2"
           tar -xjf avr-libc-2.1.0.tar.bz2
           mkdir build-avr-libc && cd build-avr-libc
-          # avr-libc compiles FOR avr — must use system x86_64 avr-gcc, not our aarch64 one.
-          # Explicitly override all tool vars so NDK env vars don't leak in.
+          # Compile FOR avr using system x86_64 avr-gcc.
+          # Explicit CC/AR/RANLIB/STRIP prevent NDK env vars from leaking in.
           ../avr-libc-2.1.0/configure \
             --prefix="${{ env.INSTALL_DIR }}" \
             --host=avr \
@@ -406,12 +304,12 @@ jobs:
 
       - name: Create bare-name tool copies (ld, as, ar, etc.)
         run: |
-          # GCC's collect2 searches -B directories for bare 'ld', 'as' etc. (not avr-prefixed).
-          # Copying (not symlinking) avoids any symlink resolution issues on Android.
+          # GCC's collect2 searches -B dirs for bare names: 'ld','as' not 'avr-ld','avr-as'
+          # cp (not symlink) — avoids symlink resolution issues on Android
           BIN="${{ env.INSTALL_DIR }}/bin"
           declare -A TOOLS=(
-            [ld]=avr-ld   [as]=avr-as     [ar]=avr-ar
-            [ranlib]=avr-ranlib [nm]=avr-nm [objcopy]=avr-objcopy
+            [ld]=avr-ld   [as]=avr-as       [ar]=avr-ar
+            [ranlib]=avr-ranlib [nm]=avr-nm  [objcopy]=avr-objcopy
             [objdump]=avr-objdump [size]=avr-size [strip]=avr-strip
           )
           for bare in "${!TOOLS[@]}"; do
@@ -423,13 +321,14 @@ jobs:
               echo "❌ MISSING: $BIN/$prefixed"; exit 1
             fi
           done
-          echo "=== bare-name tools created ==="
+          echo "=== bare-name tools done ==="
 
-      # ── Fix PT_TLS p_align: ld.bfd sets it to 8, Android Bionic requires >= 64 ──
+      # GNU ld.bfd sets PT_TLS p_align=8; Android Bionic requires >=64.
+      # Patch the p_align field directly in every ELF binary's program header.
       - name: Fix TLS segment alignment for Android Bionic
         run: |
           python3 << 'PYEOF'
-          import struct, os, glob
+          import struct, os
 
           def fix_tls_alignment(path):
               try:
@@ -437,10 +336,8 @@ jobs:
                       data = bytearray(f.read())
               except Exception:
                   return
-              # Must be ELF64 little-endian
               if data[:4] != b'\x7fELF' or data[4] != 2 or data[5] != 1:
                   return
-              # ELF64 header fields
               e_phoff     = struct.unpack_from('<Q', data, 32)[0]
               e_phentsize = struct.unpack_from('<H', data, 54)[0]
               e_phnum     = struct.unpack_from('<H', data, 56)[0]
@@ -450,7 +347,6 @@ jobs:
                   off = e_phoff + i * e_phentsize
                   p_type = struct.unpack_from('<I', data, off)[0]
                   if p_type == PT_TLS:
-                      # p_align is at byte offset 48 within ELF64 Phdr
                       align_off = off + 48
                       p_align = struct.unpack_from('<Q', data, align_off)[0]
                       if p_align < 64:
@@ -508,15 +404,13 @@ jobs:
               echo "  ❌ MISSING: $bin"; MISSING=1
             fi
           done
-
           echo "=== libgcc check ==="
           LIBGCC=$(find "${{ env.INSTALL_DIR }}/lib/gcc/avr" -name "libgcc.a" 2>/dev/null | head -1)
           if [ -z "$LIBGCC" ]; then
-            echo "  ❌ MISSING: libgcc.a for avr target"; MISSING=1
+            echo "  ❌ MISSING: libgcc.a"; MISSING=1
           else
             echo "  ✅ libgcc.a → $LIBGCC"
           fi
-
           [ "$MISSING" = "1" ] && { echo "Missing required binaries"; exit 1; }
           echo "✅ All required binaries present"
 
@@ -560,23 +454,22 @@ jobs:
           body: |
             ## AVR Toolchain for Android AArch64
 
-            Built with Android NDK r26d (API 24).
+            Built with Android NDK r26d (API 28).
             Statically linked against bionic — no SIGSYS, no TLS underalignment.
 
             ### Components
             - binutils 2.42 | GCC 12.2.0 | avr-libc 2.1.0 | avrdude 7.3
-            - Includes target libgcc.a (built via an auxiliary native-host pass)
 
             ### Archive includes
             - `bin/avr-gcc`, `bin/avr-as`, `bin/avr-ld`, `bin/avr-ar`, `bin/avr-objcopy`
             - `bin/ld`, `bin/as`, `bin/ar` etc. (bare-name copies for GCC internal use)
             - `libexec/gcc/avr/12.2.0/cc1`, `cc1plus`, `collect2`
-            - `lib/gcc/avr/12.2.0/` (libgcc.a)
+            - `lib/gcc/avr/12.2.0/libgcc.a`
             - `avr/lib/`, `avr/include/` (avr-libc)
             - `etc/avrdude.conf`
 
             ### Architecture
-            - Host ABI: aarch64-linux-android (bionic, API 24+)
+            - Host ABI: aarch64-linux-android (bionic, API 28+)
             - Target: AVR (ATmega328P, ATmega2560, etc.)
           files: ${{ env.ASSET_NAME }}
           token: ${{ secrets.GITHUB_TOKEN }}
